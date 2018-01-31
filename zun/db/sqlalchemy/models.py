@@ -163,6 +163,7 @@ class Container(Base):
     security_groups = Column(JSONEncodedList)
     auto_remove = Column(Boolean, default=False)
     runtime = Column(String(32))
+    disk = Column(Integer, default=0)
 
 
 class VolumeMapping(Base):
@@ -352,6 +353,8 @@ class Capsule(Base):
     cpu = Column(Float)
     memory = Column(String(255))
     host = Column(String(255))
+    addresses = Column(JSONEncodedDict)
+    volumes_info = Column(JSONEncodedDict)
 
 
 class PciDevice(Base):
@@ -427,6 +430,11 @@ class ContainerAction(Base):
     start_time = Column(DateTime, default=timeutils.utcnow)
     finish_time = Column(DateTime)
     message = Column(String(255))
+    container = orm.relationship(
+        "Container", backref="container_actions",
+        foreign_keys=container_uuid,
+        primaryjoin='and_(ContainerAction.container_uuid == Container.uuid)'
+    )
 
 
 class ContainerActionEvent(Base):

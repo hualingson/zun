@@ -159,6 +159,10 @@ class API(rpc_service.API):
         return self._cast(container.host, 'add_security_group',
                           container=container, security_group=security_group)
 
+    def remove_security_group(self, context, container, security_group):
+        return self._cast(container.host, 'remove_security_group',
+                          container=container, security_group=security_group)
+
     def image_pull(self, context, image):
         # NOTE(hongbin): Image API doesn't support multiple compute nodes
         # scenario yet, so we temporarily set host to None and rpc will
@@ -166,16 +170,18 @@ class API(rpc_service.API):
         host = None
         self._cast(host, 'image_pull', image=image)
 
-    def image_search(self, context, host, image, image_driver, exact_match):
+    def image_search(self, context, image, image_driver, exact_match,
+                     host=None):
         return self._call(host, 'image_search', image=image,
                           image_driver_name=image_driver,
                           exact_match=exact_match)
 
     def capsule_create(self, context, host, capsule,
-                       requested_networks, limits):
+                       requested_networks, requested_volumes, limits):
         self._cast(host, 'capsule_create',
                    capsule=capsule,
                    requested_networks=requested_networks,
+                   requested_volumes=requested_volumes,
                    limits=limits)
 
     def capsule_delete(self, context, capsule):

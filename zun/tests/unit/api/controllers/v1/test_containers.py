@@ -14,6 +14,7 @@ import mock
 from mock import patch
 from webtest.app import AppError
 
+from neutronclient.common import exceptions as n_exc
 from oslo_utils import uuidutils
 
 from zun.common import exception
@@ -120,6 +121,26 @@ class TestContainerController(api_base.FunctionalTest):
                   '"command": "env", "memory": "512",'
                   '"environment": {"key1": "val1", "key2": "val2"},'
                   '"hostname": "testhost"}')
+        response = self.post('/v1/containers?run=true',
+                             params=params,
+                             content_type='application/json')
+
+        self.assertEqual(202, response.status_int)
+        self.assertTrue(mock_container_create.called)
+        self.assertTrue(mock_container_create.call_args[1]['run'] is True)
+        mock_neutron_get_network.assert_called_once()
+
+    @patch('zun.network.neutron.NeutronAPI.get_available_network')
+    @patch('zun.compute.api.API.container_create')
+    @patch('zun.compute.api.API.image_search')
+    def test_run_container_with_disk(
+            self, mock_search,
+            mock_container_create,
+            mock_neutron_get_network):
+        params = ('{"name": "MyDocker", "image": "ubuntu",'
+                  '"command": "env", "memory": "512",'
+                  '"environment": {"key1": "val1", "key2": "val2"},'
+                  '"hostname": "testhost", "disk": "20"}')
         response = self.post('/v1/containers?run=true',
                              params=params,
                              content_type='application/json')
@@ -704,7 +725,7 @@ class TestContainerController(api_base.FunctionalTest):
         # Create a container with a command
         params = ('{"name": "MyDocker", "image": "ubuntu",'
                   '"command": "env", "memory": "512",'
-                  '"mounts": [{"source": "", "destination": "d", '
+                  '"mounts": [{"destination": "d", '
                   '"size": "5"}]}')
         response = self.post('/v1/containers/',
                              params=params,
@@ -783,7 +804,7 @@ class TestContainerController(api_base.FunctionalTest):
                                                     1000, None, 'id', 'asc',
                                                     filters=None)
         context = mock_container_list.call_args[0][0]
-        self.assertIs(False, context.all_tenants)
+        self.assertIs(False, context.all_projects)
         self.assertEqual(200, response.status_int)
         actual_containers = response.json['containers']
         self.assertEqual(1, len(actual_containers))
@@ -793,21 +814,21 @@ class TestContainerController(api_base.FunctionalTest):
     @patch('zun.common.policy.enforce')
     @patch('zun.compute.api.API.container_show')
     @patch('zun.objects.Container.list')
-    def test_get_all_containers_all_tenants(self, mock_container_list,
-                                            mock_container_show, mock_policy):
+    def test_get_all_containers_all_projects(self, mock_container_list,
+                                             mock_container_show, mock_policy):
         mock_policy.return_value = True
         test_container = utils.get_test_container()
         containers = [objects.Container(self.context, **test_container)]
         mock_container_list.return_value = containers
         mock_container_show.return_value = containers[0]
 
-        response = self.get('/v1/containers/?all_tenants=1')
+        response = self.get('/v1/containers/?all_projects=1')
 
         mock_container_list.assert_called_once_with(mock.ANY,
                                                     1000, None, 'id', 'asc',
                                                     filters=None)
         context = mock_container_list.call_args[0][0]
-        self.assertIs(True, context.all_tenants)
+        self.assertIs(True, context.all_projects)
         self.assertEqual(200, response.status_int)
         actual_containers = response.json['containers']
         self.assertEqual(1, len(actual_containers))
@@ -887,7 +908,7 @@ class TestContainerController(api_base.FunctionalTest):
             mock.ANY,
             test_container['uuid'])
         context = mock_container_get_by_uuid.call_args[0][0]
-        self.assertIs(False, context.all_tenants)
+        self.assertIs(False, context.all_projects)
         self.assertEqual(200, response.status_int)
         self.assertEqual(test_container['uuid'],
                          response.json['uuid'])
@@ -895,22 +916,22 @@ class TestContainerController(api_base.FunctionalTest):
     @patch('zun.common.policy.enforce')
     @patch('zun.compute.api.API.container_show')
     @patch('zun.objects.Container.get_by_uuid')
-    def test_get_one_by_uuid_all_tenants(self, mock_container_get_by_uuid,
-                                         mock_container_show, mock_policy):
+    def test_get_one_by_uuid_all_projects(self, mock_container_get_by_uuid,
+                                          mock_container_show, mock_policy):
         mock_policy.return_value = True
         test_container = utils.get_test_container()
         test_container_obj = objects.Container(self.context, **test_container)
         mock_container_get_by_uuid.return_value = test_container_obj
         mock_container_show.return_value = test_container_obj
 
-        response = self.get('/v1/containers/%s/?all_tenants=1' %
+        response = self.get('/v1/containers/%s/?all_projects=1' %
                             test_container['uuid'])
 
         mock_container_get_by_uuid.assert_called_once_with(
             mock.ANY,
             test_container['uuid'])
         context = mock_container_get_by_uuid.call_args[0][0]
-        self.assertIs(True, context.all_tenants)
+        self.assertIs(True, context.all_projects)
         self.assertEqual(200, response.status_int)
         self.assertEqual(test_container['uuid'],
                          response.json['uuid'])
@@ -1256,29 +1277,29 @@ class TestContainerController(api_base.FunctionalTest):
         mock_container_delete.assert_called_once_with(
             mock.ANY, test_container_obj, False)
         context = mock_container_delete.call_args[0][0]
-        self.assertIs(False, context.all_tenants)
+        self.assertIs(False, context.all_projects)
 
     @patch('zun.common.policy.enforce')
     @patch('zun.common.utils.validate_container_state')
     @patch('zun.compute.api.API.container_delete')
     @patch('zun.objects.Container.get_by_uuid')
-    def test_delete_container_by_uuid_all_tenants(self, mock_get_by_uuid,
-                                                  mock_container_delete,
-                                                  mock_validate, mock_policy):
+    def test_delete_container_by_uuid_all_projects(self, mock_get_by_uuid,
+                                                   mock_container_delete,
+                                                   mock_validate, mock_policy):
         mock_policy.return_value = True
         test_container = utils.get_test_container()
         test_container_obj = objects.Container(self.context, **test_container)
         mock_get_by_uuid.return_value = test_container_obj
 
         container_uuid = test_container.get('uuid')
-        response = self.delete('/v1/containers/%s/?all_tenants=1' %
+        response = self.delete('/v1/containers/%s/?all_projects=1' %
                                container_uuid)
 
         self.assertEqual(204, response.status_int)
         mock_container_delete.assert_called_once_with(
             mock.ANY, test_container_obj, False)
         context = mock_container_delete.call_args[0][0]
-        self.assertIs(True, context.all_tenants)
+        self.assertIs(True, context.all_projects)
 
     @patch('zun.common.utils.validate_container_state')
     @patch('zun.compute.api.API.container_stop')
@@ -1707,76 +1728,73 @@ class TestContainerController(api_base.FunctionalTest):
             mock.ANY, test_container_obj, fake_exec_id, kwargs['h'],
             kwargs['w'])
 
-    @mock.patch('zun.common.utils.get_security_group_ids')
-    @mock.patch('zun.common.utils.list_ports')
-    @mock.patch('zun.api.utils.get_resource')
-    def test_add_duplicate_default_security_group(self, mock_get_resource,
-                                                  mock_list_ports,
-                                                  mock_get_security_group_ids):
-        test_container = utils.get_test_container()
-        test_container_obj = objects.Container(self.context, **test_container)
-        test_container_obj.security_groups = []
-        mock_get_resource.return_value = test_container_obj
-        mock_list_ports.return_value = \
-            [{'security_groups': ['fake_default_security_group_id']}]
-        mock_get_security_group_ids.return_value = \
-            ['fake_default_security_group_id']
-        container_name = test_container.get('name')
-        default_security_group = 'default'
-        url = '/v1/containers/%s/%s?name=%s' % (container_name,
-                                                'add_security_group',
-                                                default_security_group)
-        response = self.post(url, expect_errors=True)
-        self.assertEqual(400, response.status_int)
-        self.assertEqual('application/json', response.content_type)
-        self.assertEqual(
-            "security_group %s already present in container" %
-            default_security_group, response.json['errors'][0]['detail'])
-
     @mock.patch('zun.compute.api.API.add_security_group')
-    @mock.patch('zun.common.utils.list_ports')
+    @mock.patch('zun.network.neutron.NeutronAPI.find_resourceid_by_name_or_id')
     @mock.patch('zun.api.utils.get_resource')
     def test_add_security_group_by_uuid(self, mock_get_resource,
-                                        mock_list_ports,
+                                        mock_find_resourceid,
                                         mock_add_security_group):
         test_container = utils.get_test_container()
         test_container_obj = objects.Container(self.context, **test_container)
         mock_get_resource.return_value = test_container_obj
-        mock_list_ports.return_value = \
-            [{'security_groups': ['fake_default_security_group_id']}]
+        mock_find_resourceid.return_value = 'fake_security_group_id'
         container_name = test_container.get('name')
         security_group_id_to_add = '5f7cf831-9a9c-4e2b-87b2-6081667f852b'
-        url = '/v1/containers/%s/%s?uuid=%s' % (container_name,
+        url = '/v1/containers/%s/%s?name=%s' % (container_name,
                                                 'add_security_group',
                                                 security_group_id_to_add)
         response = self.post(url)
         self.assertEqual(202, response.status_int)
         self.assertEqual('application/json', response.content_type)
+        mock_find_resourceid.assert_called_once_with(
+            'security_group', security_group_id_to_add, mock.ANY)
         mock_add_security_group.assert_called_once_with(
-            mock.ANY, test_container_obj, security_group_id_to_add)
+            mock.ANY, test_container_obj, 'fake_security_group_id')
 
-    @mock.patch('zun.common.utils.get_security_group_ids')
-    @mock.patch('zun.common.utils.list_ports')
+    @mock.patch('zun.compute.api.API.add_security_group')
+    @mock.patch('zun.network.neutron.NeutronAPI.find_resourceid_by_name_or_id')
     @mock.patch('zun.api.utils.get_resource')
-    def test_add_security_group_with_invalid_uuid(self, mock_get_resource,
-                                                  mock_list_ports,
-                                                  mock_get_security_group_ids):
+    def test_add_security_group_not_found(self, mock_get_resource,
+                                          mock_find_resourceid,
+                                          mock_add_security_group):
         test_container = utils.get_test_container()
         test_container_obj = objects.Container(self.context, **test_container)
         mock_get_resource.return_value = test_container_obj
-        mock_list_ports.return_value = \
-            [{'security_groups': test_container_obj.security_groups}]
+        mock_find_resourceid.side_effect = n_exc.NotFound()
         container_name = test_container.get('name')
-        invalid_uuid = 'invalid_uuid'
-        url = '/v1/containers/%s/%s?uuid=%s' % (container_name,
+        security_group_to_add = '5f7cf831-9a9c-4e2b-87b2-6081667f852b'
+        url = '/v1/containers/%s/%s?name=%s' % (container_name,
                                                 'add_security_group',
-                                                invalid_uuid)
+                                                security_group_to_add)
         response = self.post(url, expect_errors=True)
         self.assertEqual(400, response.status_int)
         self.assertEqual('application/json', response.content_type)
         self.assertEqual(
-            "Expected a uuid but received %(uuid)s." %
-            {'uuid': invalid_uuid}, response.json['errors'][0]['detail'])
+            "Security group %s not found." % security_group_to_add,
+            response.json['errors'][0]['detail'])
+
+    @mock.patch('zun.compute.api.API.add_security_group')
+    @mock.patch('zun.network.neutron.NeutronAPI.find_resourceid_by_name_or_id')
+    @mock.patch('zun.api.utils.get_resource')
+    def test_add_security_group_not_unique_match(self, mock_get_resource,
+                                                 mock_find_resourceid,
+                                                 mock_add_security_group):
+        test_container = utils.get_test_container()
+        test_container_obj = objects.Container(self.context, **test_container)
+        mock_get_resource.return_value = test_container_obj
+        mock_find_resourceid.side_effect = n_exc.NeutronClientNoUniqueMatch()
+        container_name = test_container.get('name')
+        security_group_to_add = '5f7cf831-9a9c-4e2b-87b2-6081667f852b'
+        url = '/v1/containers/%s/%s?name=%s' % (container_name,
+                                                'add_security_group',
+                                                security_group_to_add)
+        response = self.post(url, expect_errors=True)
+        self.assertEqual(409, response.status_int)
+        self.assertEqual('application/json', response.content_type)
+        self.assertEqual(
+            "Multiple security group matches found for name %s, "
+            "use an ID to be more specific." % security_group_to_add,
+            response.json['errors'][0]['detail'])
 
     @patch('zun.network.neutron.NeutronAPI.get_neutron_network')
     @patch('zun.compute.api.API.network_detach')
@@ -1795,6 +1813,32 @@ class TestContainerController(api_base.FunctionalTest):
         self.assertEqual(202, response.status_int)
         mock_detach.assert_called_once_with(mock.ANY, test_container_obj,
                                             mock.ANY)
+
+    @mock.patch('zun.compute.api.API.remove_security_group')
+    @mock.patch('zun.network.neutron.NeutronAPI.find_resourceid_by_name_or_id')
+    @mock.patch('zun.api.utils.get_resource')
+    def test_remove_security_group_by_uuid(self, mock_get_resource,
+                                           mock_find_resourceid,
+                                           mock_remove_security_group):
+        test_container = utils.get_test_container(
+            security_groups=['affb9021-964d-4b1b-80a8-9b9db60497e4'])
+        test_container_obj = objects.Container(self.context, **test_container)
+        mock_get_resource.return_value = test_container_obj
+        mock_find_resourceid.return_value = \
+            test_container_obj.security_groups[0]
+        container_name = test_container.get('name')
+        security_group_id_to_remove = test_container_obj.security_groups[0]
+        url = '/v1/containers/%s/%s?name=%s' % (container_name,
+                                                'remove_security_group',
+                                                security_group_id_to_remove)
+        response = self.post(url)
+        self.assertEqual(202, response.status_int)
+        self.assertEqual('application/json', response.content_type)
+        mock_find_resourceid.assert_called_once_with(
+            'security_group', security_group_id_to_remove, mock.ANY)
+        mock_remove_security_group.assert_called_once_with(
+            mock.ANY, test_container_obj,
+            test_container_obj.security_groups[0])
 
 
 class TestContainerEnforcement(api_base.FunctionalTest):
@@ -1815,10 +1859,10 @@ class TestContainerEnforcement(api_base.FunctionalTest):
             'container:get_all', self.get, '/v1/containers/',
             expect_errors=True)
 
-    def test_policy_disallow_get_all_all_tenants(self):
+    def test_policy_disallow_get_all_all_projects(self):
         self._common_policy_check(
-            'container:get_all_all_tenants',
-            self.get, '/v1/containers/?all_tenants=1',
+            'container:get_all_all_projects',
+            self.get, '/v1/containers/?all_projects=1',
             expect_errors=True,
             bypass_rules={'container:get_all': 'project_id:fake_project'})
 
@@ -1829,11 +1873,11 @@ class TestContainerEnforcement(api_base.FunctionalTest):
             '/v1/containers/%s/' % container.uuid,
             expect_errors=True)
 
-    def test_policy_disallow_get_one_all_tenants(self):
+    def test_policy_disallow_get_one_all_projects(self):
         container = obj_utils.create_test_container(self.context)
         self._common_policy_check(
-            'container:get_one_all_tenants', self.get,
-            '/v1/containers/%s/?all_tenants=1' % container.uuid,
+            'container:get_one_all_projects', self.get,
+            '/v1/containers/%s/?all_projects=1' % container.uuid,
             expect_errors=True)
 
     def test_policy_disallow_update(self):
@@ -1861,11 +1905,11 @@ class TestContainerEnforcement(api_base.FunctionalTest):
             '/v1/containers/%s/' % container.uuid,
             expect_errors=True)
 
-    def test_policy_disallow_delete_all_tenants(self):
+    def test_policy_disallow_delete_all_projects(self):
         container = obj_utils.create_test_container(self.context)
         self._common_policy_check(
-            'container:delete_all_tenants', self.delete,
-            '/v1/containers/%s/?all_tenants=1' % container.uuid,
+            'container:delete_all_projects', self.delete,
+            '/v1/containers/%s/?all_projects=1' % container.uuid,
             expect_errors=True)
 
     def test_policy_disallow_delete_force(self):

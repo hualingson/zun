@@ -201,7 +201,7 @@ class ZunException(Exception):
             self.message = message
 
         try:
-            self.message = self.message % kwargs
+            self.message = str(self.message) % kwargs
         except KeyError:
             # kwargs doesn't match a variable in the message
             # log the issue and the kwargs
@@ -494,7 +494,7 @@ class EntityNotFound(ZunException):
 
 
 class CommandError(ZunException):
-    message = _("The command: %(cmd)s failed on the system.")
+    message = _("The command: %(cmd)s failed on the system, due to %(error)s")
 
 
 class NoValidHost(ZunException):
@@ -657,6 +657,14 @@ class VolumeDeleteFailed(Invalid):
     message = _("Volume Deletion failed: %(deletion_failed)s")
 
 
+class SecurityGroupCannotBeApplied(Invalid):
+    message = _("Security groups cannot apply to the container.")
+
+
+class SecurityGroupCannotBeRemoved(Invalid):
+    message = _("Security groups cannot be removed from the container.")
+
+
 class ContainerActionNotFound(ZunException):
     message = _("Action for request_id %(request_id)s on container"
                 " %(container_uuid)s not fount")
@@ -664,3 +672,8 @@ class ContainerActionNotFound(ZunException):
 
 class ContainerActionEventNotFound(ZunException):
     message = _("Event %(event)s not found for action id %(action_id)s")
+
+
+class ServerNotUsable(ZunException):
+    message = _("Zun server not usable")
+    code = 404

@@ -13,6 +13,7 @@
 #    under the License.
 
 import six
+import time
 
 from oslo_log import log as logging
 from oslo_service import periodic_task
@@ -129,10 +130,29 @@ class Manager(periodic_task.PeriodicTasks):
             container.host = None
         container.save(context)
 
+    def _wait_for_volumes_available(self, context, volumes, container,
+                                    timeout=60, poll_interval=1):
+        count = 0
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if count == len(volumes):
+                break
+            for vol in volumes:
+                if self.driver.is_volume_available(context, vol):
+                    count = count + 1
+            time.sleep(poll_interval)
+        else:
+            msg = _("Volumes did not reach available status after"
+                    "%d seconds") % (timeout)
+            self._fail_container(context, container, msg, unset_host=True)
+            raise exception.Conflict(msg)
+
     def container_create(self, context, limits, requested_networks,
                          requested_volumes, container, run, pci_requests=None):
         @utils.synchronized(container.uuid)
         def do_container_create():
+            self._wait_for_volumes_available(context, requested_volumes,
+                                             container)
             if not self._attach_volumes(context, container, requested_volumes):
                 return
             created_container = self._do_container_create(
@@ -235,7 +255,6 @@ class Manager(periodic_task.PeriodicTasks):
                 if self.use_sandbox:
                     sandbox = self._create_sandbox(context, container,
                                                    requested_networks,
-                                                   requested_volumes,
                                                    reraise)
                     if sandbox is None:
                         return
@@ -315,7 +334,7 @@ class Manager(periodic_task.PeriodicTasks):
                  'driver': self.driver})
 
     def _create_sandbox(self, context, container, requested_networks,
-                        requested_volumes, reraise=False):
+                        reraise=False):
         self._update_task_state(context, container, consts.SANDBOX_CREATING)
         sandbox_image = CONF.sandbox_image
         sandbox_image_driver = CONF.sandbox_image_driver
@@ -330,7 +349,7 @@ class Manager(periodic_task.PeriodicTasks):
             sandbox_id = self.driver.create_sandbox(
                 context, container, image=sandbox_image,
                 requested_networks=requested_networks,
-                requested_volumes=requested_volumes)
+                requested_volumes=[])
             return sandbox_id
         except Exception as e:
             with excutils.save_and_reraise_exception(reraise=reraise):
@@ -416,6 +435,26 @@ class Manager(periodic_task.PeriodicTasks):
         try:
             self.driver.add_security_group(context, container, security_group)
             container.security_groups += [security_group]
+            container.save(context)
+        except Exception as e:
+            with excutils.save_and_reraise_exception(reraise=False):
+                LOG.exception("Unexpected exception: %s", six.text_type(e))
+
+    def remove_security_group(self, context, container, security_group):
+        @utils.synchronized(container.uuid)
+        def do_remove_security_group():
+            self._remove_security_group(context, container, security_group)
+
+        utils.spawn_n(do_remove_security_group)
+
+    def _remove_security_group(self, context, container, security_group):
+        LOG.debug('Removing security_group from container: %s', container.uuid)
+        try:
+            self.driver.remove_security_group(context, container,
+                                              security_group)
+            security_groups = (set(container.security_groups)
+                               - set([security_group]))
+            container.security_groups = list(security_groups)
             container.save(context)
         except Exception as e:
             with excutils.save_and_reraise_exception(reraise=False):
@@ -866,16 +905,29 @@ class Manager(periodic_task.PeriodicTasks):
                 except Exception:
                     return
 
-    def capsule_create(self, context, capsule, requested_networks, limits):
+    def capsule_create(self, context, capsule, requested_networks,
+                       requested_volumes, limits):
         @utils.synchronized("capsule-" + capsule.uuid)
         def do_capsule_create():
             self._do_capsule_create(context, capsule, requested_networks,
-                                    limits)
+                                    requested_volumes, limits)
 
         utils.spawn_n(do_capsule_create)
 
-    def _do_capsule_create(self, context, capsule, requested_networks=None,
+    def _do_capsule_create(self, context, capsule,
+                           requested_networks=None,
+                           requested_volumes=None,
                            limits=None, reraise=False):
+        """Create capsule in the compute node
+
+        :param context: security context
+        :param capsule: the special capsule object
+        :param requested_networks: the network ports that capsule will
+               connect
+        :param requested_volumes: the volume that capsule need
+        :param limits: no use field now.
+        :param reraise: flag of reraise the error, default is Falses
+        """
         capsule.containers[0].image = CONF.sandbox_image
         capsule.containers[0].image_driver = CONF.sandbox_image_driver
         capsule.containers[0].image_pull_policy = \
@@ -883,24 +935,57 @@ class Manager(periodic_task.PeriodicTasks):
         capsule.containers[0].save(context)
         sandbox = self._create_sandbox(context,
                                        capsule.containers[0],
-                                       requested_networks, reraise)
+                                       requested_networks,
+                                       reraise)
         capsule.containers[0].task_state = None
         capsule.containers[0].status = consts.RUNNING
         sandbox_id = capsule.containers[0].get_sandbox_id()
         capsule.containers[0].container_id = sandbox_id
         capsule.containers[0].save(context)
+        capsule.addresses = capsule.containers[0].addresses
+        capsule.save(context)
         count = len(capsule.containers)
+
         for k in range(1, count):
+            container_requested_volumes = []
             capsule.containers[k].set_sandbox_id(sandbox_id)
             capsule.containers[k].addresses = capsule.containers[0].addresses
+            container_name = capsule.containers[k].name
+            for volume in requested_volumes:
+                if volume.get(container_name, None):
+                    container_requested_volumes.append(
+                        volume.get(container_name))
+            if not self._attach_volumes(context, capsule.containers[k],
+                                        container_requested_volumes):
+                return
+            # Add volume assignment
             created_container = \
                 self._do_container_create_base(context,
                                                capsule.containers[k],
                                                requested_networks,
+                                               container_requested_volumes,
                                                sandbox=sandbox,
                                                limits=limits)
             if created_container:
                 self._do_container_start(context, created_container)
+
+            # Save the volumes_info to capsule database
+            for volumeapp in container_requested_volumes:
+                volume_id = volumeapp.volume_id
+                container_uuid = volumeapp.container_uuid
+                if capsule.volumes_info:
+                    container_attached = capsule.volumes_info.get(volume_id)
+                else:
+                    capsule.volumes_info = {}
+                    container_attached = None
+                if container_attached:
+                    if container_uuid not in container_attached:
+                        container_attached.append(container_uuid)
+                else:
+                    container_list = [container_uuid]
+                    capsule.volumes_info[volume_id] = container_list
+
+        capsule.save(context)
 
     def capsule_delete(self, context, capsule):
         # NOTE(kevinz): Delete functional containers first and then delete
@@ -911,12 +996,17 @@ class Manager(periodic_task.PeriodicTasks):
                     objects.Container.get_by_uuid(context, uuid)
                 self.container_delete(context, container, force=True)
             except Exception as e:
-                LOG.exception(e)
+                LOG.exception("Failed to delete container %(uuid0)s because "
+                              "it doesn't exist in the capsule. Stale data "
+                              "identified by %(uuid1)s is deleted from "
+                              "database: %(error)s",
+                              {'uuid0': uuid, 'uuid1': uuid, 'error': e})
         try:
-            container = \
-                objects.Container.get_by_uuid(context,
-                                              capsule.containers_uuids[0])
-            self.container_delete(context, container, force=True)
+            if capsule.containers_uuids:
+                container = \
+                    objects.Container.get_by_uuid(context,
+                                                  capsule.containers_uuids[0])
+                self.container_delete(context, container, force=True)
         except Exception as e:
             LOG.exception(e)
         capsule.task_state = None

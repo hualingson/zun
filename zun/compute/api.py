@@ -50,8 +50,8 @@ class API(object):
         # container create will fail with 400 status.
         if CONF.api.enable_image_validation:
             images = self.rpcapi.image_search(
-                context, host_state['host'], new_container.image,
-                new_container.image_driver, True)
+                context, new_container.image,
+                new_container.image_driver, True, host_state['host'])
             if not images:
                 raise exception.ImageNotFound(image=new_container.image)
 
@@ -119,6 +119,9 @@ class API(object):
     def add_security_group(self, context, container, *args):
         return self.rpcapi.add_security_group(context, container, *args)
 
+    def remove_security_group(self, context, container, *args):
+        return self.rpcapi.remove_security_group(context, container, *args)
+
     def container_put_archive(self, context, container, *args):
         return self.rpcapi.container_put_archive(context, container, *args)
 
@@ -131,11 +134,12 @@ class API(object):
     def image_pull(self, context, image):
         return self.rpcapi.image_pull(context, image)
 
-    def image_search(self, context, image, image_driver, *args):
-        return self.rpcapi.image_search(context, image, image_driver, *args)
+    def image_search(self, context, image, image_driver, exact_match, *args):
+        return self.rpcapi.image_search(context, image, image_driver,
+                                        exact_match, *args)
 
-    def capsule_create(self, context, new_capsule,
-                       requested_networks=None, extra_spec=None):
+    def capsule_create(self, context, new_capsule, requested_networks=None,
+                       requested_volumes=None, extra_spec=None):
         host_state = None
         try:
             host_state = self._schedule_container(context, new_capsule,
@@ -146,7 +150,8 @@ class API(object):
             new_capsule.save(context)
             return
         self.rpcapi.capsule_create(context, host_state['host'], new_capsule,
-                                   requested_networks, host_state['limits'])
+                                   requested_networks, requested_volumes,
+                                   host_state['limits'])
 
     def capsule_delete(self, context, capsule, *args):
         return self.rpcapi.capsule_delete(context, capsule, *args)

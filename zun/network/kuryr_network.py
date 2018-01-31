@@ -12,12 +12,14 @@
 
 import ipaddress
 import six
+import sys
 import time
 
 from neutronclient.common import exceptions
 from oslo_log import log as logging
 from oslo_utils import excutils
 
+from zun.common import context as zun_context
 from zun.common import exception
 from zun.common.i18n import _
 import zun.conf
@@ -137,7 +139,7 @@ class KuryrNetwork(network.Network):
     def _get_subnetpool(self, subnet):
         # NOTE(kiennt): Elevate admin privilege to list all subnetpools
         #               across projects.
-        admin_context = self.neutron_api.context.elevated()
+        admin_context = zun_context.get_admin_context()
         neutron_api = neutron.NeutronAPI(admin_context)
         subnetpool_id = subnet.get('subnetpool_id')
         if self._check_valid_subnetpool(neutron_api, subnetpool_id,
@@ -190,6 +192,13 @@ class KuryrNetwork(network.Network):
             # We might revisit this behaviour later. Alternatively, we could
             # either throw an exception or overwrite the port's security
             # groups.
+            if not container.security_groups:
+                container.security_groups = []
+            if neutron_port['security_groups']:
+                for sg in neutron_port['security_groups']:
+                    if sg not in container.security_groups:
+                        container.security_groups += [sg]
+                container.save(self.context)
 
             # update device_id in port
             port_req_body = {'port': {'device_id': container.uuid}}
@@ -208,7 +217,7 @@ class KuryrNetwork(network.Network):
                 # NOTE(hongbin): Use admin context here because non-admin
                 # context might not be able to update some attributes
                 # (i.e. binding:profile).
-                admin_context = self.neutron_api.context.elevated()
+                admin_context = zun_context.get_admin_context()
                 neutron_api = neutron.NeutronAPI(admin_context)
                 neutron_api.update_port(neutron_port_id, port_req_body)
         else:
@@ -288,20 +297,27 @@ class KuryrNetwork(network.Network):
             container_id = container.container_id
 
         neutron_ports = set()
+        all_ports = set()
         if container.addresses and neutron_network_id:
             addrs_list = container.addresses.get(neutron_network_id, [])
             for addr in addrs_list:
+                all_ports.add(addr['port'])
                 if not addr['preserve_on_delete']:
                     port_id = addr['port']
                     neutron_ports.add(port_id)
 
         try:
-            self.docker.disconnect_container_from_network(container_id,
-                                                          network_name)
+            if container_id:
+                self.docker.disconnect_container_from_network(container_id,
+                                                              network_name)
         finally:
-            for port_id in neutron_ports:
+            for port_id in all_ports:
                 try:
-                    self.neutron_api.delete_port(port_id)
+                    if port_id in neutron_ports:
+                        self.neutron_api.delete_port(port_id)
+                    else:
+                        port_req_body = {'port': {'device_id': ""}}
+                        self.neutron_api.update_port(port_id, port_req_body)
                 except exceptions.PortNotFoundClient:
                     LOG.warning('Maybe your libnetwork distribution do not '
                                 'have patch https://review.openstack.org/#/c/'
@@ -333,10 +349,55 @@ class KuryrNetwork(network.Network):
                          "to port %(port_id)s",
                          {'security_group_ids': security_group_ids,
                           'port_id': port['id']})
-                admin_context = self.neutron_api.context.elevated()
+                admin_context = zun_context.get_admin_context()
                 neutron_api = neutron.NeutronAPI(admin_context)
                 neutron_api.update_port(port['id'],
                                         {'port': updated_port})
+            except exceptions.NeutronClientException as e:
+                exc_info = sys.exc_info()
+                if e.status_code == 400:
+                    raise exception.SecurityGroupCannotBeApplied(
+                        six.text_type(e))
+                else:
+                    six.reraise(*exc_info)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    LOG.exception("Neutron Error:")
+
+    def remove_security_groups_from_ports(self, container, security_group_ids):
+        container_id = container.get_sandbox_id()
+        if not container_id:
+            container_id = container.container_id
+
+        port_ids = set()
+        for addrs_list in container.addresses.values():
+            for addr in addrs_list:
+                port_id = addr['port']
+                port_ids.add(port_id)
+
+        search_opts = {'tenant_id': self.context.project_id}
+        neutron_ports = self.neutron_api.list_ports(
+            **search_opts).get('ports', [])
+        neutron_ports = [p for p in neutron_ports if p['id'] in port_ids]
+        for port in neutron_ports:
+            port['security_groups'].remove(security_group_ids[0])
+            updated_port = {'security_groups': port['security_groups']}
+            try:
+                LOG.info("Removing security group %(security_group_ids)s "
+                         "from port %(port_id)s",
+                         {'security_group_ids': security_group_ids,
+                          'port_id': port['id']})
+                admin_context = zun_context.get_admin_context()
+                neutron_api = neutron.NeutronAPI(admin_context)
+                neutron_api.update_port(port['id'],
+                                        {'port': updated_port})
+            except exceptions.NeutronClientException as e:
+                exc_info = sys.exc_info()
+                if e.status_code == 400:
+                    raise exception.SecurityGroupCannotBeRemoved(
+                        six.text_type(e))
+                else:
+                    six.reraise(*exc_info)
             except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.exception("Neutron Error:")

@@ -108,22 +108,6 @@ class TestUtils(base.TestCase):
             container, 'execute'))
 
     @mock.patch('zun.common.clients.OpenStackClients.neutron')
-    def test_list_ports(self, mock_neutron_client):
-        container = Container(self.context, **db_utils.get_test_container())
-        container.addresses = None
-        self.assertEqual([], utils.list_ports(self.context, container))
-        container.addresses = {'df1e72a0-0251': [
-            {'version': 4,
-             'addr': '172.24.4.13',
-             'port': '2a3fcf1'}]}
-        neutron_client_instance = mock.MagicMock()
-        neutron_client_instance.show_port.return_value = \
-            {'port': 'test_port_info'}
-        mock_neutron_client.return_value = neutron_client_instance
-        result_container_ports = utils.list_ports(self.context, container)
-        self.assertEqual(['test_port_info'], result_container_ports)
-
-    @mock.patch('zun.common.clients.OpenStackClients.neutron')
     def test_get_security_group_ids(self, mock_neutron_client):
         security_groups = None
         self.assertIsNone(utils.get_security_group_ids(self.context,
@@ -159,25 +143,66 @@ class TestUtils(base.TestCase):
             params = ({"kind": "capsule", "spec": {}})
             utils.check_capsule_template(params)
 
+        params = ({"kind": "capsule", "restartPolicy": "Always", "spec": {
+            "containers": [{"image": "test1"}]
+        }})
+        utils.check_capsule_template(params)
+        self.assertEqual(params["restart_policy"], "always")
+
+    def test_capsule_get_container_spec(self):
         with self.assertRaisesRegex(
                 exception.InvalidCapsuleTemplate,
                 "Capsule need to have one container at least"):
-            params = ({"kind": "capsule", "spec": {"containers": []}})
-            utils.check_capsule_template(params)
+            params = ({"containers": []})
+            utils.capsule_get_container_spec(params)
 
         with self.assertRaisesRegex(
                 exception.InvalidCapsuleTemplate, "Container "
                                                   "image is needed"):
-            params = ({"kind": "capsule",
-                       "spec": {"containers": [{"labels": {"app": "web"}}]}})
-            utils.check_capsule_template(params)
+            params = ({"containers": [{"labels": {"app": "web"}}]})
+            utils.capsule_get_container_spec(params)
 
         with self.assertRaisesRegex(
                 exception.InvalidCapsuleTemplate, "Container image is needed"):
-            params = ({"kind": "capsule",
-                       "spec": {"containers": [{"image": "test1"},
-                                {"environment": {"ROOT_PASSWORD": "foo0"}}]}})
-            utils.check_capsule_template(params)
+            params = ({"containers": [
+                {"image": "test1"},
+                {"environment": {"ROOT_PASSWORD": "foo0"}}]})
+            utils.capsule_get_container_spec(params)
+
+        params = ({"containers": [
+            {"image": "test1", "env": {"ROOT_PASSWORD": "foo0"}}]})
+        utils.capsule_get_container_spec(params)
+        self.assertEqual(params.get("containers")[0].get("environment"),
+                         {"ROOT_PASSWORD": "foo0"})
+        self.assertNotIn("env", params.get("containers"))
+
+    def test_capsule_get_volume_spec(self):
+        with self.assertRaisesRegex(
+                exception.InvalidCapsuleTemplate,
+                "Volume name is needed"):
+            params = ({"volumes": [{"foo": "bar"}]})
+            utils.capsule_get_volume_spec(params)
+
+        with self.assertRaisesRegex(
+                exception.InvalidCapsuleTemplate, "Volume size is needed"):
+            params = ({"volumes": [{"name": "test",
+                                    "cinder": {"foo": "bar"}}]})
+            utils.capsule_get_volume_spec(params)
+
+        with self.assertRaisesRegex(
+                exception.InvalidCapsuleTemplate, "Volume size and uuid "
+                                                  "could not be set at "
+                                                  "the same time"):
+            params = ({"volumes": [{"name": "test",
+                                    "cinder": {"size": 3,
+                                               "volumeID": "fakevolid"}}]})
+            utils.capsule_get_volume_spec(params)
+
+        with self.assertRaisesRegex(
+                exception.InvalidCapsuleTemplate, "Zun now Only support "
+                                                  "Cinder volume driver"):
+            params = ({"volumes": [{"name": "test", "other": {}}]})
+            utils.capsule_get_volume_spec(params)
 
     @patch('zun.objects.Image.get_by_uuid')
     def test_get_image(self, mock_image_get_by_uuid):

@@ -161,19 +161,18 @@ class DockerDriver(driver.ContainerDriver):
 
             host_config = {}
             host_config['runtime'] = runtime
+            host_config['binds'] = binds
+            kwargs['volumes'] = [b['bind'] for b in binds.values()]
             if sandbox_id:
                 host_config['network_mode'] = 'container:%s' % sandbox_id
                 # TODO(hongbin): Uncomment this after docker-py add support for
                 # container mode for pid namespace.
                 # host_config['pid_mode'] = 'container:%s' % sandbox_id
                 host_config['ipc_mode'] = 'container:%s' % sandbox_id
-                host_config['volumes_from'] = sandbox_id
             else:
                 self._process_networking_config(
                     context, container, requested_networks, host_config,
                     kwargs, docker)
-                host_config['binds'] = binds
-                kwargs['volumes'] = [b['bind'] for b in binds.values()]
             if container.auto_remove:
                 host_config['auto_remove'] = container.auto_remove
             if container.memory is not None:
@@ -186,6 +185,10 @@ class DockerDriver(driver.ContainerDriver):
                 name = container.restart_policy['Name']
                 host_config['restart_policy'] = {'Name': name,
                                                  'MaximumRetryCount': count}
+            if container.disk:
+                disk_size = str(container.disk) + 'G'
+                host_config['storage_opt'] = {'size': disk_size}
+
             kwargs['host_config'] = docker.create_host_config(**host_config)
             image_repo = image['repo'] + ":" + image['tag']
             response = docker.create_container(image_repo, **kwargs)
@@ -210,7 +213,7 @@ class DockerDriver(driver.ContainerDriver):
         docker_net_name = self._get_docker_network_name(
             context, requested_network['network'])
         security_group_ids = utils.get_security_group_ids(
-            context, container. security_groups)
+            context, container.security_groups)
         addresses, port = network_api.create_or_update_port(
             container, docker_net_name, requested_network, security_group_ids)
         container.addresses = {requested_network['network']: addresses}
@@ -248,8 +251,8 @@ class DockerDriver(driver.ContainerDriver):
 
     def _setup_network_for_container(self, context, container,
                                      requested_networks, network_api):
-        security_group_ids = utils.get_security_group_ids(context, container.
-                                                          security_groups)
+        security_group_ids = utils.get_security_group_ids(
+            context, container.security_groups)
         addresses = {}
         if container.addresses:
             addresses = container.addresses
@@ -287,11 +290,12 @@ class DockerDriver(driver.ContainerDriver):
                         return
                     raise
 
+    @wrap_docker_error
     def _cleanup_network_for_container(self, container, network_api):
         if not container.addresses:
             return
         for neutron_net in container.addresses:
-            docker_net = neutron_net + '-' + container.project_id
+            docker_net = neutron_net
             network_api.disconnect_container_from_network(
                 container, docker_net, neutron_network_id=neutron_net)
 
@@ -311,13 +315,13 @@ class DockerDriver(driver.ContainerDriver):
 
             container_id = db_container.container_id
             docker_container = id_to_container_map.get(container_id)
-            if not docker_container:
+            if not container_id or not docker_container:
                 if db_container.auto_remove:
                     db_container.status = consts.DELETED
                     db_container.save(context)
                 else:
-                    LOG.warning("Container was recorded in DB but missing in "
-                                "docker")
+                    LOG.warning("Container %s was recorded in DB but missing "
+                                "in docker", db_container.uuid)
                 continue
 
             self._populate_container(db_container, docker_container)
@@ -330,9 +334,11 @@ class DockerDriver(driver.ContainerDriver):
             return
 
         id_to_db_container_map = {container.container_id: container
-                                  for container in db_containers}
+                                  for container in db_containers
+                                  if container.container_id}
         id_to_container_map = {container.container_id: container
-                               for container in containers}
+                               for container in containers
+                               if container.container_id}
 
         for cid in (six.viewkeys(id_to_container_map) &
                     six.viewkeys(id_to_db_container_map)):
@@ -619,6 +625,8 @@ class DockerDriver(driver.ContainerDriver):
                 docker.kill(container.container_id)
             else:
                 docker.kill(container.container_id, signal)
+            container.status = consts.STOPPED
+            container.status_reason = None
             return container
 
     @check_container_id
@@ -797,6 +805,12 @@ class DockerDriver(driver.ContainerDriver):
             context=context)
         volume_driver.delete(volume_mapping)
 
+    def is_volume_available(self, context, volume_mapping):
+        volume_driver = vol_driver.driver(
+            provider=volume_mapping.volume_provider,
+            context=context)
+        return volume_driver.is_volume_available(volume_mapping)
+
     def _get_or_create_docker_network(self, context, network_api,
                                       neutron_net_id):
         docker_net_name = self._get_docker_network_name(context,
@@ -807,9 +821,10 @@ class DockerDriver(driver.ContainerDriver):
                                        name=docker_net_name)
 
     def _get_docker_network_name(self, context, neutron_net_id):
-        # Append project_id to the network name to avoid name collision
-        # across projects.
-        return neutron_net_id + '-' + context.project_id
+        # Note(kiseok7): neutron_net_id is a unique ID in neutron networks and
+        # docker networks.
+        # so it will not be duplicated across projects.
+        return neutron_net_id
 
     def delete_sandbox(self, context, container):
         sandbox_id = container.get_sandbox_id()
@@ -882,9 +897,18 @@ class DockerDriver(driver.ContainerDriver):
             network_api.add_security_groups_to_ports(container,
                                                      [security_group])
 
+    def remove_security_group(self, context, container, security_group):
+
+        with docker_utils.docker_client() as docker:
+            network_api = zun_network.api(context=context,
+                                          docker_api=docker)
+            network_api.remove_security_groups_from_ports(container,
+                                                          [security_group])
+
     def get_available_nodes(self):
         return [self._host.get_hostname()]
 
+    @wrap_docker_error
     def network_detach(self, context, container, network):
         with docker_utils.docker_client() as docker:
             network_api = zun_network.api(context,

@@ -35,10 +35,13 @@ from zun.common import clients
 from zun.common import consts
 from zun.common import exception
 from zun.common.i18n import _
+from zun.common import privileged
 import zun.conf
+from zun.network import neutron
 
 CONF = zun.conf.CONF
 LOG = logging.getLogger(__name__)
+NETWORK_ATTACH_EXTERNAL = 'network:attach_external_network'
 
 synchronized = lockutils.synchronized_with_prefix('zun-')
 
@@ -70,7 +73,31 @@ VALID_STATES = {
              consts.STOPPED, consts.UNKNOWN],
     'stats': [consts.RUNNING],
     'add_security_group': [consts.CREATED, consts.RUNNING, consts.STOPPED,
-                           consts.PAUSED]
+                           consts.PAUSED],
+    'remove_security_group': [consts.CREATED, consts.RUNNING, consts.STOPPED,
+                              consts.PAUSED]
+}
+
+VALID_CONTAINER_FILED = {
+    'image': 'image',
+    'command': 'command',
+    'args': 'args',
+    'resources': 'resources',
+    'ports': 'ports',
+    'volumeMounts': 'volumeMounts',
+    'env': 'environment',
+    'workDir': 'workdir',
+    'imagePullPolicy': 'image_pull_policy',
+}
+
+VALID_CAPSULE_FIELD = {
+    'restartPolicy': 'restart_policy',
+}
+
+VALID_CAPSULE_RESTART_POLICY = {
+    'Never': 'no',
+    'Always': 'always',
+    'OnFailure': 'on-failure',
 }
 
 
@@ -286,21 +313,6 @@ def parse_floating_cpu(spec):
     return cpuset_ids
 
 
-def list_ports(context, container, **kwargs):
-    container_ports = []
-    if not container.addresses:
-        return container_ports
-    else:
-        port_list = []
-        neutron_client = clients.OpenStackClients(context).neutron()
-        for ports in container.addresses.values():
-            port_list.extend([p['port'] for p in ports])
-        port_set = set(port_list)
-        for port in port_set:
-            container_ports.append(neutron_client.show_port(port)['port'])
-    return container_ports
-
-
 def get_security_group_ids(context, security_groups, **kwargs):
     if security_groups is None:
         return None
@@ -320,53 +332,116 @@ def get_security_group_ids(context, security_groups, **kwargs):
                 security_groups)
 
 
-def get_root_helper():
-    # TODO(hongbin): Use rootwrap instead
-    return 'sudo'
+def custom_execute(*cmd, **kwargs):
+    try:
+        return processutils.execute(*cmd, **kwargs)
+    except processutils.ProcessExecutionError as e:
+        sanitized_cmd = strutils.mask_password(' '.join(cmd))
+        raise exception.CommandError(cmd=sanitized_cmd,
+                                     error=six.text_type(e))
+
+
+@privileged.default.entrypoint
+def execute_root(*cmd, **kwargs):
+    # NOTE(kiennt): Set run_as_root=False because if it is set to True, the
+    #               command is prefixed by the command specified in the
+    #               root_helper kwargs [1]. But we use oslo.privsep instead
+    #               of rootwrap so set run_as_root=False.
+    # [1] https://github.com/openstack/oslo.concurrency/blob/master/oslo_concurrency/processutils.py#L218 # noqa
+    return custom_execute(*cmd, shell=False, run_as_root=False, **kwargs)
 
 
 def execute(*cmd, **kwargs):
-    if 'run_as_root' in kwargs and 'root_helper' not in kwargs:
-        kwargs['root_helper'] = get_root_helper()
-
-    return processutils.execute(*cmd, **kwargs)
+    run_as_root = kwargs.pop('run_as_root', False)
+    # NOTE(kiennt): Root_helper is unnecessary when use privsep,
+    #               therefore pop it!
+    kwargs.pop('root_helper', None)
+    if run_as_root:
+        return execute_root(*cmd, **kwargs)
+    else:
+        return custom_execute(*cmd, **kwargs)
 
 
 def check_capsule_template(tpl):
     # TODO(kevinz): add volume spec check
-    kind_field = tpl.get('kind', None)
+    kind_field = tpl.get('kind')
     if kind_field not in ['capsule', 'Capsule']:
         raise exception.InvalidCapsuleTemplate("kind fields need to be "
                                                "set as capsule or Capsule")
-    spec_field = tpl.get('spec', None)
+    # Align the Capsule restartPolicy with container restart_policy
+    if 'restartPolicy' in tpl.keys():
+        tpl['restartPolicy'] = \
+            VALID_CAPSULE_RESTART_POLICY[tpl['restartPolicy']]
+        tpl[VALID_CAPSULE_FIELD['restartPolicy']] = tpl.pop('restartPolicy')
+
+    spec_field = tpl.get('spec')
     if spec_field is None:
         raise exception.InvalidCapsuleTemplate("No Spec found")
-    if spec_field.get('containers', None) is None:
+    if spec_field.get('containers') is None:
         raise exception.InvalidCapsuleTemplate("No valid containers field")
-    containers_spec = spec_field.get('containers', None)
+    return spec_field
+
+
+def capsule_get_container_spec(spec_field):
+    containers_spec = spec_field.get('containers')
     containers_num = len(containers_spec)
     if containers_num == 0:
         raise exception.InvalidCapsuleTemplate("Capsule need to have one "
                                                "container at least")
 
     for i in range(0, containers_num):
-        container_image = containers_spec[i].get('image', None)
-        if container_image is None:
+        container_spec = containers_spec[i]
+        if 'image' not in container_spec.keys():
             raise exception.InvalidCapsuleTemplate("Container "
                                                    "image is needed")
+        # Remap the Capsule's container fields to native Zun container fields.
+        for key in list(container_spec.keys()):
+            container_spec[VALID_CONTAINER_FILED[key]] = \
+                container_spec.pop(key)
+
     return containers_spec
 
 
-def is_all_tenants(search_opts):
-    all_tenants = search_opts.get('all_tenants')
-    if all_tenants:
+def capsule_get_volume_spec(spec_field):
+    volumes_spec = spec_field.get('volumes')
+    if not volumes_spec:
+        return []
+    volumes_num = len(volumes_spec)
+
+    for i in range(volumes_num):
+        volume_name = volumes_spec[i].get('name')
+        if volume_name is None:
+            raise exception.InvalidCapsuleTemplate("Volume name "
+                                                   "is needed")
+        if volumes_spec[i].get('cinder'):
+            cinder_spec = volumes_spec[i].get('cinder')
+            volume_uuid = cinder_spec.get('volumeID')
+            volume_size = cinder_spec.get('size')
+            if not volume_uuid:
+                if volume_size is None:
+                    raise exception.InvalidCapsuleTemplate("Volume size "
+                                                           "is needed")
+            elif volume_uuid and volume_size:
+                raise exception.InvalidCapsuleTemplate("Volume size and uuid "
+                                                       "could not be set at "
+                                                       "the same time")
+        else:
+            raise exception.InvalidCapsuleTemplate("Zun now Only support "
+                                                   "Cinder volume driver")
+
+    return volumes_spec
+
+
+def is_all_projects(search_opts):
+    all_projects = search_opts.get('all_projects')
+    if all_projects:
         try:
-            all_tenants = strutils.bool_from_string(all_tenants, True)
+            all_projects = strutils.bool_from_string(all_projects, True)
         except ValueError as err:
             raise exception.InvalidValue(six.text_type(err))
     else:
-        all_tenants = False
-    return all_tenants
+        all_projects = False
+    return all_projects
 
 
 def get_container(container_ident):
@@ -406,3 +481,61 @@ def check_for_restart_policy(container_dict):
             raise exception.InvalidValue(msg)
     elif name in ['no']:
         container_dict.get('restart_policy')['MaximumRetryCount'] = '0'
+
+
+def build_requested_networks(context, nets):
+    """Build requested networks by calling neutron client
+
+    :param nets: The special network uuid when create container
+                 if none, will call neutron to create new network.
+    :returns: available network and ports
+    """
+    neutron_api = neutron.NeutronAPI(context)
+    requested_networks = []
+    for net in nets:
+        if net.get('port'):
+            port = neutron_api.get_neutron_port(net['port'])
+            neutron_api.ensure_neutron_port_usable(port)
+            network = neutron_api.get_neutron_network(port['network_id'])
+            requested_networks.append({'network': port['network_id'],
+                                       'port': port['id'],
+                                       'router:external':
+                                           network.get('router:external'),
+                                       'shared': network.get('shared'),
+                                       'v4-fixed-ip': '',
+                                       'v6-fixed-ip': '',
+                                       'preserve_on_delete': True})
+        elif net.get('network'):
+            network = neutron_api.get_neutron_network(net['network'])
+            requested_networks.append({'network': network['id'],
+                                       'port': '',
+                                       'router:external':
+                                           network.get('router:external'),
+                                       'shared': network.get('shared'),
+                                       'v4-fixed-ip':
+                                           net.get('v4-fixed-ip', ''),
+                                       'v6-fixed-ip':
+                                           net.get('v6-fixed-ip', ''),
+                                       'preserve_on_delete': False})
+    if not requested_networks:
+        # Find an available neutron net and create docker network by
+        # wrapping the neutron net.
+        neutron_net = neutron_api.get_available_network()
+        requested_networks.append({'network': neutron_net['id'],
+                                   'port': '',
+                                   'v4-fixed-ip': '',
+                                   'v6-fixed-ip': '',
+                                   'preserve_on_delete': False})
+
+    check_external_network_attach(context, requested_networks)
+    return requested_networks
+
+
+def check_external_network_attach(context, nets):
+    """Check if attaching to external network is permitted."""
+    if not context.can(NETWORK_ATTACH_EXTERNAL,
+                       fatal=False):
+        for net in nets:
+            if net.get('router:external') and not net.get('shared'):
+                raise exception.ExternalNetworkAttachForbidden(
+                    network_uuid=net['network'])

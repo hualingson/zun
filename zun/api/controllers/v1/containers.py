@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from neutronclient.common import exceptions as n_exc
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import uuidutils
@@ -26,6 +27,7 @@ from zun.api.controllers.v1.views import containers_view as view
 from zun.api.controllers import versions
 from zun.api import utils as api_utils
 from zun.common import consts
+from zun.common import context as zun_context
 from zun.common import exception
 from zun.common.i18n import _
 from zun.common import name_generator
@@ -96,7 +98,8 @@ class ContainersController(base.Controller):
         'commit': ['POST'],
         'add_security_group': ['POST'],
         'network_detach': ['POST'],
-        'network_attach': ['POST']
+        'network_attach': ['POST'],
+        'remove_security_group': ['POST']
     }
 
     @pecan.expose('json')
@@ -112,10 +115,10 @@ class ContainersController(base.Controller):
 
     def _get_containers_collection(self, **kwargs):
         context = pecan.request.context
-        if utils.is_all_tenants(kwargs):
-            policy.enforce(context, "container:get_all_all_tenants",
-                           action="container:get_all_all_tenants")
-            context.all_tenants = True
+        if utils.is_all_projects(kwargs):
+            policy.enforce(context, "container:get_all_all_projects",
+                           action="container:get_all_all_projects")
+            context.all_projects = True
         limit = api_utils.validate_limit(kwargs.get('limit'))
         sort_dir = api_utils.validate_sort_dir(kwargs.get('sort_dir', 'asc'))
         sort_key = kwargs.get('sort_key', 'id')
@@ -134,7 +137,9 @@ class ContainersController(base.Controller):
                                             sort_key,
                                             sort_dir,
                                             filters=filters)
-
+        if not context.is_admin:
+            for container in containers:
+                del container.host
         return ContainerCollection.convert_with_links(containers, limit,
                                                       url=resource_url,
                                                       expand=expand,
@@ -149,14 +154,20 @@ class ContainersController(base.Controller):
         :param container_ident: UUID or name of a container.
         """
         context = pecan.request.context
-        if utils.is_all_tenants(kwargs):
-            policy.enforce(context, "container:get_one_all_tenants",
-                           action="container:get_one_all_tenants")
-            context.all_tenants = True
+        if utils.is_all_projects(kwargs):
+            policy.enforce(context, "container:get_one_all_projects",
+                           action="container:get_one_all_projects")
+            context.all_projects = True
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:get_one")
         compute_api = pecan.request.compute_api
-        container = compute_api.container_show(context, container)
+        try:
+            container = compute_api.container_show(context, container)
+        except exception.ContainerHostNotUp:
+            raise exception.ServerNotUsable
+
+        if not context.is_admin:
+            del container.host
         return view.format_container(pecan.request.host_url, container)
 
     def _generate_name_for_container(self):
@@ -171,7 +182,7 @@ class ContainersController(base.Controller):
     @validation.validate_query_param(pecan.request, schema.query_param_create)
     @validation.validated(schema.container_create)
     def post(self, run=False, **container_dict):
-        """Create a new container.
+        """Create or run a new container.
 
         :param run: if true, starts the container
         :param container_dict: a container within the request body.
@@ -181,18 +192,22 @@ class ContainersController(base.Controller):
         policy.enforce(context, "container:create",
                        action="container:create")
 
-        # remove duplicate security_groups from list
         if container_dict.get('security_groups'):
-            container_dict['security_groups'] = list(
-                set(container_dict.get('security_groups')))
+            # remove duplicate security_groups from list
+            container_dict['security_groups'] = list(set(
+                container_dict.get('security_groups')))
+            for index, sg in enumerate(container_dict['security_groups']):
+                security_group_id = self._check_security_group(context,
+                                                               {'name': sg})
+                container_dict['security_groups'][index] = security_group_id
+
         try:
             run = strutils.bool_from_string(run, strict=True)
             container_dict['interactive'] = strutils.bool_from_string(
                 container_dict.get('interactive', False), strict=True)
         except ValueError:
-            msg = _('Valid run or interactive value is ''true'', '
-                    '"false", True, False, "True" and "False"')
-            raise exception.InvalidValue(msg)
+            raise exception.InvalidValue(_('Valid run or interactive values '
+                                           'are: true, false, True, False'))
 
         auto_remove = container_dict.pop('auto_remove', None)
         if auto_remove is not None:
@@ -203,8 +218,8 @@ class ContainersController(base.Controller):
                     container_dict['auto_remove'] = strutils.bool_from_string(
                         auto_remove, strict=True)
                 except ValueError:
-                    msg = _('Auto_remove value are true or false')
-                    raise exception.InvalidValue(msg)
+                    raise exception.InvalidValue(_('Auto_remove values are: '
+                                                   'true, false, True, False'))
             else:
                 raise exception.InvalidParamInVersion(param='auto_remove',
                                                       req_version=req_version,
@@ -233,7 +248,7 @@ class ContainersController(base.Controller):
                                                       min_version=min_version)
 
         nets = container_dict.get('nets', [])
-        requested_networks = self._build_requested_networks(context, nets)
+        requested_networks = utils.build_requested_networks(context, nets)
         pci_req = self._create_pci_requests_for_sriov_ports(context,
                                                             requested_networks)
 
@@ -352,64 +367,13 @@ class ContainersController(base.Controller):
         phynet_name = None
         # NOTE(hongbin): Use admin context here because non-admin users are
         # unable to retrieve provider:* attributes.
-        admin_context = context.elevated()
+        admin_context = zun_context.get_admin_context()
         neutron_api = neutron.NeutronAPI(admin_context)
         network = neutron_api.show_network(
             net_id, fields='provider:physical_network')
         net = network.get('network')
         phynet_name = net.get('provider:physical_network')
         return phynet_name
-
-    def _check_external_network_attach(self, context, nets):
-        """Check if attaching to external network is permitted."""
-        if not context.can(NETWORK_ATTACH_EXTERNAL,
-                           fatal=False):
-            for net in nets:
-                if net.get('router:external') and not net.get('shared'):
-                    raise exception.ExternalNetworkAttachForbidden(
-                        network_uuid=net['network'])
-
-    def _build_requested_networks(self, context, nets):
-        neutron_api = neutron.NeutronAPI(context)
-        requested_networks = []
-        for net in nets:
-            if net.get('port'):
-                port = neutron_api.get_neutron_port(net['port'])
-                neutron_api.ensure_neutron_port_usable(port)
-                network = neutron_api.get_neutron_network(port['network_id'])
-                requested_networks.append({'network': port['network_id'],
-                                           'port': port['id'],
-                                           'router:external':
-                                               network.get('router:external'),
-                                           'shared': network.get('shared'),
-                                           'v4-fixed-ip': '',
-                                           'v6-fixed-ip': '',
-                                           'preserve_on_delete': True})
-            elif net.get('network'):
-                network = neutron_api.get_neutron_network(net['network'])
-                requested_networks.append({'network': network['id'],
-                                           'port': '',
-                                           'router:external':
-                                               network.get('router:external'),
-                                           'shared': network.get('shared'),
-                                           'v4-fixed-ip':
-                                               net.get('v4-fixed-ip', ''),
-                                           'v6-fixed-ip':
-                                               net.get('v6-fixed-ip', ''),
-                                           'preserve_on_delete': False})
-
-        if not requested_networks:
-            # Find an available neutron net and create docker network by
-            # wrapping the neutron net.
-            neutron_net = neutron_api.get_available_network()
-            requested_networks.append({'network': neutron_net['id'],
-                                       'port': '',
-                                       'v4-fixed-ip': '',
-                                       'v6-fixed-ip': '',
-                                       'preserve_on_delete': False})
-
-        self._check_external_network_attach(context, requested_networks)
-        return requested_networks
 
     def _build_requested_volumes(self, context, mounts):
         # NOTE(hongbin): We assume cinder is the only volume provider here.
@@ -418,14 +382,13 @@ class ContainersController(base.Controller):
         cinder_api = cinder.CinderAPI(context)
         requested_volumes = []
         for mount in mounts:
-            if mount['source'] != '':
+            if mount.get('source'):
                 volume = cinder_api.search_volume(mount['source'])
-                cinder_api.ensure_volume_usable(volume)
                 auto_remove = False
             else:
                 volume = cinder_api.create_volume(mount['size'])
                 auto_remove = True
-
+            cinder_api.ensure_volume_usable(volume)
             volmapp = objects.VolumeMapping(
                 context,
                 volume_id=volume.id, volume_provider='cinder',
@@ -437,33 +400,23 @@ class ContainersController(base.Controller):
 
         return requested_volumes
 
-    def _check_security_group(self, context, security_group, container):
-        if security_group.get("uuid"):
-            security_group_id = security_group.get("uuid")
-            if not uuidutils.is_uuid_like(security_group_id):
-                raise exception.InvalidUUID(uuid=security_group_id)
-            if security_group_id in container.security_groups:
-                msg = _("security_group %s already present in container") % \
-                    security_group_id
+    def _check_security_group(self, context, security_group):
+        neutron_api = neutron.NeutronAPI(context)
+        try:
+            return neutron_api.find_resourceid_by_name_or_id(
+                'security_group', security_group['name'], context.project_id)
+        except n_exc.NeutronClientNoUniqueMatch as e:
+            msg = _("Multiple security group matches found for name "
+                    "%(name)s, use an ID to be more specific.") % {
+                'name': security_group['name']}
+            raise exception.Conflict(msg)
+        except n_exc.NeutronClientException as e:
+            if e.status_code == 404:
+                msg = _("Security group %(name)s not found.") % {
+                    'name': security_group['name']}
                 raise exception.InvalidValue(msg)
-        else:
-            security_group_ids = utils.get_security_group_ids(
-                context, [security_group['name']])
-            if len(security_group_ids) > len(security_group):
-                msg = _("Multiple security group matches "
-                        "found for name %(name)s, use an ID "
-                        "to be more specific. ") % security_group
-                raise exception.Conflict(msg)
             else:
-                security_group_id = security_group_ids[0]
-        container_ports_detail = utils.list_ports(context, container)
-
-        for container_port_detail in container_ports_detail:
-            if security_group_id in container_port_detail['security_groups']:
-                msg = _("security_group %s already present in container") % \
-                    list(security_group.values())[0]
-                raise exception.InvalidValue(msg)
-        return security_group_id
+                raise
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -483,10 +436,38 @@ class ContainersController(base.Controller):
         # check if security group already presnt in container
         context = pecan.request.context
         compute_api = pecan.request.compute_api
-        security_group_id = self._check_security_group(
-            context, security_group, container)
+        security_group_id = self._check_security_group(context, security_group)
+        if security_group_id in container.security_groups:
+            msg = _("Security group %(id)s has been added to container.") % {
+                'id': security_group_id}
+            raise exception.InvalidValue(msg)
         compute_api.add_security_group(context, container,
                                        security_group_id)
+        pecan.response.status = 202
+
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    @validation.validated(schema.remove_security_group)
+    def remove_security_group(self, container_ident, **security_group):
+        """Remove security group from an existing container.
+
+        :param container_ident: UUID or Name of a container.
+        :param security_group: security_group to be removed from container.
+        """
+        container = utils.get_container(container_ident)
+        check_policy_on_container(
+            container.as_dict(), "container:remove_security_group")
+        utils.validate_container_state(container, 'remove_security_group')
+
+        context = pecan.request.context
+        compute_api = pecan.request.compute_api
+        security_group_id = self._check_security_group(context, security_group)
+        if security_group_id not in container.security_groups:
+            msg = _("Security group %(id)s was not added to container.") % {
+                'id': security_group_id}
+            raise exception.InvalidValue(msg)
+        compute_api.remove_security_group(context, container,
+                                          security_group_id)
         pecan.response.status = 202
 
     @pecan.expose('json')
@@ -539,23 +520,25 @@ class ContainersController(base.Controller):
         :param force: If True, allow to force delete the container.
         """
         context = pecan.request.context
-        if utils.is_all_tenants(kwargs):
-            policy.enforce(context, "container:delete_all_tenants",
-                           action="container:delete_all_tenants")
-            context.all_tenants = True
+        if utils.is_all_projects(kwargs):
+            policy.enforce(context, "container:delete_all_projects",
+                           action="container:delete_all_projects")
+            context.all_projects = True
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:delete")
         try:
             force = strutils.bool_from_string(force, strict=True)
         except ValueError:
-            msg = _('Valid force values are true, false, 0, 1, yes and no')
-            raise exception.InvalidValue(msg)
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid force values are: %s')
+                                         % bools)
         stop = kwargs.pop('stop', False)
         try:
             stop = strutils.bool_from_string(stop, strict=True)
         except ValueError:
-            msg = _('Valid stop values are true, false, 0, 1, yes and no')
-            raise exception.InvalidValue(msg)
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid stop values are: %s')
+                                         % bools)
         compute_api = pecan.request.compute_api
         if not force and not stop:
             utils.validate_container_state(container, 'delete')
@@ -702,9 +685,10 @@ class ContainersController(base.Controller):
             stderr = strutils.bool_from_string(stderr, strict=True)
             timestamps = strutils.bool_from_string(timestamps, strict=True)
         except ValueError:
-            msg = _('Valid stdout, stderr and timestamps values are ''true'', '
-                    '"false", True, False, 0 and 1, yes and no')
-            raise exception.InvalidValue(msg)
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid stdout, stderr and '
+                                           'timestamps values are: %s')
+                                         % bools)
         LOG.debug('Calling compute.container_logs with %s', container.uuid)
         context = pecan.request.context
         compute_api = pecan.request.compute_api
@@ -730,8 +714,9 @@ class ContainersController(base.Controller):
             run = strutils.bool_from_string(run, strict=True)
             interactive = strutils.bool_from_string(interactive, strict=True)
         except ValueError:
-            msg = _('Valid run values are true, false, 0, 1, yes and no')
-            raise exception.InvalidValue(msg)
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid run or interactive '
+                                           'values are: %s') % bools)
         LOG.debug('Calling compute.container_exec with %(uuid)s command '
                   '%(command)s',
                   {'uuid': container.uuid, 'command': kwargs['command']})

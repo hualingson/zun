@@ -17,23 +17,30 @@ from oslo_serialization import jsonutils as json
 
 from zun.common import name_generator
 from zun.db import api as db_api
+from zun.db.etcd import api as etcd_api
 
 CONF = cfg.CONF
 
-CAPSULE_SPEC = {"kind": "capsule", "capsule_template_version": "2017-06-21",
-                "capsule_version": "beta", "restart_policy": "always",
+CAPSULE_SPEC = {"kind": "capsule",
+                "capsuleVersion": "beta",
+                "restartPolicy": "Always",
                 "spec": {"containers":
-                         [{"environment": {"MYSQL_ROOT_PASSWORD": "password"},
-                           "image": "mysql", "labels": {"app": "web"},
-                           "image_driver": "docker", "resources":
-                                   {"allocation": {"cpu": 1,
-                                                   "memory": 1024}}}],
-                         "volumes": [{"name": "volume1",
-                                      "image": "ubuntu-xenial",
-                                      "drivers": "cinder",
-                                      "volumeType": "type1",
-                                      "driverOptions": "options",
-                                      "size": "5GB"}]}}
+                         [{"env": {"TEST": "password"},
+                           "image": "test",
+                           "resources":
+                               {"requests": {"cpu": 1, "memory": 1024}},
+                           "volumeMounts": [
+                               {"name": "volume1", "mountPath": "/data1"},
+                               {"name": "volume2", "mountPath": "/data2"}]
+                           }],
+                         "volumes": [
+                             {"name": "volume1",
+                              "cinder": {
+                                  "volumeID":
+                                      "9600e785-9320-4d3f-ba02-04e3d43fddec"}
+                              },
+                             {"name": "volume2",
+                              "cinder": {"size": 5}}]}}
 
 
 def get_test_container(**kwargs):
@@ -50,7 +57,7 @@ def get_test_container(**kwargs):
         'command': kwargs.get('command', 'fake_command'),
         'status': kwargs.get('status', 'Running'),
         'status_reason': kwargs.get('status_reason', 'Created Successfully'),
-        'task_state': kwargs.get('task_state', 'container_creating'),
+        'task_state': kwargs.get('task_state', None),
         'environment': kwargs.get('environment', {'key1': 'val1',
                                                   'key2': 'val2'}),
         'cpu': kwargs.get('cpu', 1.0),
@@ -84,7 +91,16 @@ def get_test_container(**kwargs):
         'security_groups': kwargs.get('security_groups', ['default']),
         'auto_remove': kwargs.get('auto_remove', False),
         'runtime': kwargs.get('runtime', 'runc'),
+        'disk': kwargs.get('disk', 20),
     }
+
+
+def _get_dbapi():
+    if CONF.database.backend == 'sqlalchemy':
+        dbapi = db_api._get_dbdriver_instance()
+    else:
+        dbapi = etcd_api.get_backend()
+    return dbapi
 
 
 def create_test_container(**kwargs):
@@ -96,9 +112,9 @@ def create_test_container(**kwargs):
     """
     container = get_test_container(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del container['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_container(kwargs['context'], container)
 
 
@@ -124,9 +140,9 @@ def get_test_volume_mapping(**kwargs):
 def create_test_volume_mapping(**kwargs):
     volume_mapping = get_test_volume_mapping(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del volume_mapping['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_volume_mapping(kwargs['context'], volume_mapping)
 
 
@@ -158,7 +174,7 @@ def create_test_image(**kwargs):
         del image['id']
     if 'repo' not in kwargs:
         image['repo'] = _generate_repo_for_image()
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.pull_image(kwargs['context'], image)
 
 
@@ -188,9 +204,9 @@ def get_test_zun_service(**kwargs):
 def create_test_zun_service(**kwargs):
     zun_service = get_test_zun_service(**kwargs)
     # Let DB generate ID if it isn't specifiled explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del zun_service['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_zun_service(zun_service)
 
 
@@ -212,9 +228,9 @@ def get_test_resource_provider(**kwargs):
 def create_test_resource_provider(**kwargs):
     provider = get_test_resource_provider(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del provider['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_resource_provider(kwargs['context'], provider)
 
 
@@ -231,9 +247,9 @@ def get_test_resource_class(**kwargs):
 def create_test_resource_class(**kwargs):
     resource = get_test_resource_class(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del resource['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_resource_class(kwargs['context'], resource)
 
 
@@ -258,10 +274,10 @@ def get_test_inventory(**kwargs):
 def create_test_inventory(**kwargs):
     inventory = get_test_inventory(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del inventory['id']
     provider_id = inventory.pop('resource_provider_id')
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_inventory(kwargs['context'], provider_id, inventory)
 
 
@@ -283,9 +299,9 @@ def get_test_allocation(**kwargs):
 def create_test_allocation(**kwargs):
     allocation = get_test_allocation(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if 'id' not in kwargs:
         del allocation['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_allocation(kwargs['context'], allocation)
 
 
@@ -334,7 +350,7 @@ def get_test_compute_node(**kwargs):
 
 def create_test_compute_node(**kwargs):
     compute_host = get_test_compute_node(**kwargs)
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_compute_node(kwargs['context'], compute_host)
 
 
@@ -379,6 +395,21 @@ def get_test_capsule(**kwargs):
             'containers_uuids', ['ea8e2a25-2901-438d-8157-de7ffd68d051',
                                  '6219e0fb-2935-4db2-a3c7-86a2ac3ac84e']),
         'host': kwargs.get('host', 'localhost'),
+        'addresses': kwargs.get('addresses', {
+            'private': [
+                {
+                    'OS-EXT-IPS-MAC:mac_addr': 'fa:16:3e:04:da:76',
+                    'port': '1234567',
+                    'version': 4,
+                    'addr': '10.0.0.12',
+                    'OS-EXT-IPS:type': 'fixed'
+                },
+            ],
+        }),
+        'volumes_info': kwargs.get(
+            'volumes_info',
+            {'9a6b029d-1a2c-42f3-aac0-dec33e3f7835':
+                'ea8e2a25-2901-438d-8157-de7ffd68d051'}),
     }
 
 
@@ -391,14 +422,19 @@ def create_test_capsule(**kwargs):
     """
     capsule = get_test_capsule(**kwargs)
     # Let DB generate ID if it isn't specified explicitly
-    if CONF.db_type == 'sql' and 'id' not in kwargs:
+    if CONF.database.backend == 'sqlalchemy' and 'id' not in kwargs:
         del capsule['id']
-    dbapi = db_api._get_dbdriver_instance()
+    dbapi = _get_dbapi()
     return dbapi.create_capsule(kwargs['context'], capsule)
 
 
+class FakeObject(object):
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+
 def get_test_action(**kwargs):
-    return {
+    action_values = {
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
         'id': kwargs.get('id', 123),
@@ -413,9 +449,15 @@ def get_test_action(**kwargs):
         'message': kwargs.get('message', 'fake-message'),
     }
 
+    fake_action = FakeObject()
+    for k, v in action_values.items():
+        setattr(fake_action, k, v)
+    return fake_action
+
 
 def get_test_action_event(**kwargs):
-    return {
+
+    event_values = {
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
         'id': kwargs.get('id', 123),
@@ -426,3 +468,8 @@ def get_test_action_event(**kwargs):
         'result': kwargs.get('result', 'Error'),
         'traceback': kwargs.get('traceback', 'fake-tb'),
     }
+
+    fake_event = FakeObject()
+    for k, v in event_values.items():
+        setattr(fake_event, k, v)
+    return fake_event

@@ -34,6 +34,7 @@ _container_properties = {
     'nets': parameter_types.nets,
     'runtime': parameter_types.runtime,
     'hostname': parameter_types.hostname,
+    'disk': parameter_types.positive_integer,
 }
 
 container_create = {
@@ -74,7 +75,7 @@ query_param_delete = {
     'type': 'object',
     'properties': {
         'force': parameter_types.boolean_extended,
-        'all_tenants': parameter_types.boolean_extended,
+        'all_projects': parameter_types.boolean_extended,
         'stop': parameter_types.boolean_extended
     },
     'additionalProperties': False
@@ -162,16 +163,12 @@ add_security_group = {
             'type': 'string',
             'minLength': 1,
             'maxLength': 255
-        },
-        'uuid': {
-            'type': 'string',
-            'minLength': 2,
-            'maxLength': 255,
-            'pattern': '[a-zA-Z0-9][a-zA-Z0-9_.-]'
         }
     },
     'additionalProperties': False
 }
+
+remove_security_group = copy.deepcopy(add_security_group)
 
 network_detach = {
     'type': 'object',

@@ -40,9 +40,9 @@ rules = [
         ]
     ),
     policy.DocumentedRuleDefault(
-        name=CONTAINER % 'delete_all_tenants',
+        name=CONTAINER % 'delete_all_projects',
         check_str=base.RULE_ADMIN_API,
-        description='Delete a container from all tenants.',
+        description='Delete a container from all projects.',
         operations=[
             {
                 'path': '/v1/containers/{container_ident}',
@@ -73,10 +73,10 @@ rules = [
         ]
     ),
     policy.DocumentedRuleDefault(
-        name=CONTAINER % 'get_one_all_tenants',
+        name=CONTAINER % 'get_one_all_projects',
         check_str=base.RULE_ADMIN_API,
         description=('Retrieve the details of a specific container from '
-                     'all tenants.'),
+                     'all projects.'),
         operations=[
             {
                 'path': '/v1/containers/{container_ident}',
@@ -96,9 +96,9 @@ rules = [
         ]
     ),
     policy.DocumentedRuleDefault(
-        name=CONTAINER % 'get_all_all_tenants',
+        name=CONTAINER % 'get_all_all_projects',
         check_str=base.RULE_ADMIN_API,
-        description='Retrieve the details of all containers across tenants.',
+        description='Retrieve the details of all containers across projects.',
         operations=[
             {
                 'path': '/v1/containers',
@@ -357,6 +357,18 @@ rules = [
         operations=[
             {
                 'path': '/v1/containers/{container_ident}/network_attach',
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'remove_security_group',
+        check_str=base.RULE_ADMIN_OR_OWNER,
+        description='Remove security group from a specific container.',
+        operations=[
+            {
+                'path': ('/v1/containers/'
+                         '{container_ident}/remove_security_group'),
                 'method': 'POST'
             }
         ]

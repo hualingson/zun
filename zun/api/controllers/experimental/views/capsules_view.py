@@ -20,7 +20,12 @@ from zun.api.controllers import link
 _basic_keys = (
     'id',
     'uuid',
+    'user_id',
+    'project_id',
     'created_at',
+    'updated_at',
+    'addresses',
+    'volumes_info',
     'status',
     'restart_policy',
     'meta_name',

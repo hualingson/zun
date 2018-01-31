@@ -34,14 +34,14 @@ LOG = log.getLogger(__name__)
 CONF = zun.conf.CONF
 
 
-def get_connection():
+def get_backend():
     connection = EtcdAPI(host=CONF.etcd.etcd_host,
                          port=CONF.etcd.etcd_port)
     return connection
 
 
 def clean_all_data():
-    conn = get_connection()
+    conn = get_backend()
     conn.clean_all_zun_data()
 
 
@@ -84,6 +84,10 @@ def translate_etcd_result(etcd_result, model_type):
             ret = models.PciDevice(data)
         elif model_type == 'volume_mapping':
             ret = models.VolumeMapping(data)
+        elif model_type == 'container_action':
+            ret = models.ContainerAction(data)
+        elif model_type == 'container_action_event':
+            ret = models.ContainerActionEvent(data)
         else:
             raise exception.InvalidParameterValue(
                 _('The model_type value: %s is invalid.'), model_type)
@@ -112,9 +116,9 @@ class EtcdAPI(object):
                       six.text_type(e))
             raise
 
-    def _add_tenant_filters(self, context, filters):
+    def _add_project_filters(self, context, filters):
         filters = filters or {}
-        if context.is_admin and context.all_tenants:
+        if context.is_admin and context.all_projects:
             return filters
 
         if context.project_id:
@@ -166,7 +170,7 @@ class EtcdAPI(object):
         for c in res:
             if c.value is not None:
                 containers.append(translate_etcd_result(c, 'container'))
-        filters = self._add_tenant_filters(context, filters)
+        filters = self._add_project_filters(context, filters)
         filtered_containers = self._filter_resources(
             containers, filters)
         return self._process_list_result(filtered_containers,
@@ -219,7 +223,7 @@ class EtcdAPI(object):
             res = self.client.read('/containers/' + container_uuid)
             container = translate_etcd_result(res, 'container')
             filtered_containers = self._filter_resources(
-                [container], self._add_tenant_filters(context, {}))
+                [container], self._add_project_filters(context, {}))
             if len(filtered_containers) > 0:
                 return filtered_containers[0]
             else:
@@ -233,7 +237,7 @@ class EtcdAPI(object):
 
     def get_container_by_name(self, context, container_name):
         try:
-            filters = self._add_tenant_filters(
+            filters = self._add_project_filters(
                 context, {'name': container_name})
             containers = self.list_containers(context, filters=filters)
         except etcd.EtcdKeyNotFound:
@@ -415,7 +419,7 @@ class EtcdAPI(object):
         for i in res:
             if i.value is not None:
                 images.append(translate_etcd_result(i, 'image'))
-        filters = self._add_tenant_filters(context, filters)
+        filters = self._add_project_filters(context, filters)
         filtered_images = self._filter_resources(images, filters)
 
         return self._process_list_result(filtered_images,
@@ -426,7 +430,7 @@ class EtcdAPI(object):
             res = self.client.read('/images/' + image_uuid)
             image = translate_etcd_result(res, 'image')
             filtered_images = self._filter_resources(
-                [image], self._add_tenant_filters(context, {}))
+                [image], self._add_project_filters(context, {}))
             if len(filtered_images) > 0:
                 return filtered_images[0]
             else:
@@ -662,7 +666,7 @@ class EtcdAPI(object):
         for c in res:
             if c.value is not None:
                 capsules.append(translate_etcd_result(c, 'capsule'))
-        filters = self._add_tenant_filters(context, filters)
+        filters = self._add_project_filters(context, filters)
         filtered_capsules = self._filter_resources(
             capsules, filters)
         return self._process_list_result(filtered_capsules,
@@ -687,7 +691,7 @@ class EtcdAPI(object):
             res = self.client.read('/capsules/' + capsule_uuid)
             capsule = translate_etcd_result(res, 'capsule')
             filtered_capsules = self._filter_resources(
-                [capsule], self._add_tenant_filters(context, {}))
+                [capsule], self._add_project_filters(context, {}))
             if len(filtered_capsules) > 0:
                 return filtered_capsules[0]
             else:
@@ -701,7 +705,7 @@ class EtcdAPI(object):
 
     def get_capsule_by_meta_name(self, context, capsule_meta_name):
         try:
-            filters = self._add_tenant_filters(
+            filters = self._add_project_filters(
                 context, {'meta_name': capsule_meta_name})
             capsules = self.list_capsules(context, filters=filters)
         except etcd.EtcdKeyNotFound:
@@ -882,7 +886,7 @@ class EtcdAPI(object):
             if vm.value is not None:
                 volume_mappings.append(
                     translate_etcd_result(vm, 'volume_mapping'))
-        filters = self._add_tenant_filters(context, filters)
+        filters = self._add_project_filters(context, filters)
         filtered_vms = self._filter_resources(volume_mappings, filters)
         return self._process_list_result(filtered_vms, limit=limit,
                                          sort_key=sort_key)
@@ -906,7 +910,7 @@ class EtcdAPI(object):
             res = self.client.read('/volume_mappings/' + volume_mapping_uuid)
             volume_mapping = translate_etcd_result(res, 'volume_mapping')
             filtered_vms = self._filter_resources(
-                [volume_mapping], self._add_tenant_filters(context, {}))
+                [volume_mapping], self._add_project_filters(context, {}))
             if filtered_vms:
                 return filtered_vms[0]
             else:
@@ -947,3 +951,192 @@ class EtcdAPI(object):
             raise
 
         return translate_etcd_result(target, 'volume_mapping')
+
+    @lockutils.synchronized('etcd_action')
+    def action_start(self, context, values):
+        values['created_at'] = datetime.isoformat(timeutils.utcnow())
+        if not values.get('uuid'):
+            values['uuid'] = uuidutils.generate_uuid()
+
+        action = models.ContainerAction(values)
+        try:
+            action.save()
+        except Exception:
+            raise
+        return action
+
+    def _actions_get(self, context, container_uuid, filters=None):
+        action_path = '/container_actions/' + container_uuid
+
+        try:
+            res = getattr(self.client.read(action_path), 'children', None)
+        except etcd.EtcdKeyNotFound:
+            return []
+        except Exception as e:
+            LOG.error(
+                "Error occurred while reading from etcd server: %s",
+                six.text_type(e))
+            raise
+
+        actions = []
+        for c in res:
+            if c.value is not None:
+                actions.append(translate_etcd_result(c, 'container_action'))
+        filters = self._add_project_filters(context, filters)
+        filtered_actions = self._filter_resources(actions, filters)
+        sorted_actions = self._process_list_result(filtered_actions,
+                                                   sort_key='created_at')
+        # Actions need descending order of created_at.
+        sorted_actions.reverse()
+        return sorted_actions
+
+    def actions_get(self, context, container_uuid):
+        return self._actions_get(context, container_uuid)
+
+    def _action_get_by_request_id(self, context, container_uuid, request_id):
+        filters = {'request_id': request_id}
+        actions = self._actions_get(context, container_uuid, filters=filters)
+        if not actions:
+            return None
+        return actions[0]
+
+    def action_get_by_request_id(self, context, container_uuid, request_id):
+        return self._action_get_by_request_id(context, container_uuid,
+                                              request_id)
+
+    @lockutils.synchronized('etcd_action')
+    def action_event_start(self, context, values):
+        """Start an event on a container action."""
+        action = self._action_get_by_request_id(context,
+                                                values['container_uuid'],
+                                                values['request_id'])
+
+        # When zun-compute restarts, the request_id was different with
+        # request_id recorded in ContainerAction, so we can't get the original
+        # recode according to request_id. Try to get the last created action
+        # so that init_container can continue to finish the recovery action.
+        if not action and not context.project_id:
+            actions = self._actions_get(context, values['container_uuid'])
+            if not actions:
+                action = actions[0]
+
+        if not action:
+            raise exception.ContainerActionNotFound(
+                request_id=values['request_id'],
+                container_uuid=values['container_uuid'])
+
+        values['action_id'] = action['id']
+        values['action_uuid'] = action['uuid']
+
+        values['created_at'] = datetime.isoformat(timeutils.utcnow())
+        if not values.get('uuid'):
+            values['uuid'] = uuidutils.generate_uuid()
+
+        event = models.ContainerActionEvent(values)
+        try:
+            event.save()
+        except Exception:
+            raise
+        return event
+
+    def _action_events_get(self, context, action_uuid, filters=None):
+        event_path = '/container_actions_events/' + action_uuid
+
+        try:
+            res = getattr(self.client.read(event_path), 'children', None)
+        except etcd.EtcdKeyNotFound:
+            return []
+        except Exception as e:
+            LOG.error(
+                "Error occurred while reading from etcd server: %s",
+                six.text_type(e))
+            raise
+
+        events = []
+        for c in res:
+            if c.value is not None:
+                events.append(translate_etcd_result(
+                    c, 'container_action_event'))
+
+        filters = filters or {}
+        filtered_events = self._filter_resources(events, filters)
+        sorted_events = self._process_list_result(filtered_events,
+                                                  sort_key='created_at')
+        # Events need descending order of created_at.
+        sorted_events.reverse()
+        return sorted_events
+
+    def _get_event_by_name(self, context, action_uuid, event_name):
+        filters = {'event': event_name}
+        events = self._action_events_get(context, action_uuid, filters)
+        if not events:
+            return None
+        return events[0]
+
+    @lockutils.synchronized('etcd_action')
+    def action_event_finish(self, context, values):
+        """Finish an event on a container action."""
+        action = self._action_get_by_request_id(context,
+                                                values['container_uuid'],
+                                                values['request_id'])
+
+        # When zun-compute restarts, the request_id was different with
+        # request_id recorded in ContainerAction, so we can't get the original
+        # recode according to request_id. Try to get the last created action
+        # so that init_container can continue to finish the recovery action.
+        if not action and not context.project_id:
+            actions = self._actions_get(context, values['container_uuid'])
+            if not actions:
+                action = actions[0]
+
+        if not action:
+            raise exception.ContainerActionNotFound(
+                request_id=values['request_id'],
+                container_uuid=values['container_uuid'])
+
+        event = self._get_event_by_name(context, action['uuid'],
+                                        values['event'])
+
+        if not event:
+            raise exception.ContainerActionEventNotFound(
+                action_id=action['uuid'], event=values['event'])
+
+        try:
+            target_path = '/container_actions_events/{0}/{1}'.\
+                format(action['uuid'], event['uuid'])
+            target = self.client.read(target_path)
+            target_values = json.loads(target.value)
+            target_values.update(values)
+            target.value = json.dump_as_bytes(target_values)
+            self.client.update(target)
+        except etcd.EtcdKeyNotFound:
+            raise exception.ContainerActionEventNotFound(
+                action_id=action['uuid'], event=values['event'])
+        except Exception as e:
+            LOG.error('Error occurred while updating action event: %s',
+                      six.text_type(e))
+            raise
+
+        if values['result'].lower() == 'error':
+            try:
+                target_path = '/container_actions/{0}/{1}'.\
+                    format(action['container_uuid'], action['uuid'])
+                target = self.client.read(target_path)
+                target_values = json.loads(target.value)
+                target_values.update({'message': 'Error'})
+                target.value = json.dump_as_bytes(target_values)
+                self.client.update(target)
+            except etcd.EtcdKeyNotFound:
+                raise exception.ContainerActionNotFound(
+                    request_id=action['request_id'],
+                    container_uuid=action['container_uuid'])
+            except Exception as e:
+                LOG.error('Error occurred while updating action : %s',
+                          six.text_type(e))
+                raise
+
+        return event
+
+    def action_events_get(self, context, action_id):
+        events = self._action_events_get(context, action_id)
+        return events
