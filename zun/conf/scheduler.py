@@ -63,9 +63,12 @@ Related options:
 """),
     cfg.ListOpt("enabled_filters",
                 default=[
+                    "AvailabilityZoneFilter",
                     "CPUFilter",
                     "RamFilter",
-                    "ComputeFilter"
+                    "ComputeFilter",
+                    "DiskFilter",
+                    "RuntimeFilter",
                     ],
                 help="""
 Filters that the scheduler will use.

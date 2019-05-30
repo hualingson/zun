@@ -13,21 +13,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import jsonpatch
+import functools
 from oslo_utils import uuidutils
 import pecan
-import wsme
 
+from zun.api.controllers import versions
+from zun.common import exception
 from zun.common.i18n import _
 import zun.conf
 from zun import objects
 
 CONF = zun.conf.CONF
-
-
-JSONPATCH_EXCEPTIONS = (jsonpatch.JsonPatchException,
-                        jsonpatch.JsonPointerException,
-                        KeyError)
 
 
 DOCKER_MINIMUM_MEMORY = 4 * 1024 * 1024
@@ -43,9 +39,9 @@ def string_or_none(value):
 def validate_limit(limit):
     try:
         if limit is not None and int(limit) <= 0:
-            raise wsme.exc.ClientSideError(_("Limit must be positive integer"))
+            raise exception.InvalidValue(_("Limit must be positive integer"))
     except ValueError:
-        raise wsme.exc.ClientSideError(_("Limit must be positive integer"))
+        raise exception.InvalidValue(_("Limit must be positive integer"))
 
     if limit is not None:
         return min(CONF.api.max_limit, int(limit))
@@ -55,25 +51,10 @@ def validate_limit(limit):
 
 def validate_sort_dir(sort_dir):
     if sort_dir not in ['asc', 'desc']:
-        raise wsme.exc.ClientSideError(_("Invalid sort direction: %s. "
-                                         "Acceptable values are "
-                                         "'asc' or 'desc'") % sort_dir)
+        raise exception.InvalidValue(_("Invalid sort direction: %s. "
+                                       "Acceptable values are "
+                                       "'asc' or 'desc'") % sort_dir)
     return sort_dir
-
-
-def apply_jsonpatch(doc, patch):
-    for p in patch:
-        if p['op'] == 'add' and p['path'].count('/') == 1:
-            attr = p['path'].lstrip('/')
-            if attr not in doc:
-                msg = _("Adding a new attribute %s to the root of "
-                        "the resource is not allowed.") % p['path']
-                raise wsme.exc.ClientSideError(msg)
-            if doc[attr] is not None:
-                msg = _("The attribute %s has existed, please use "
-                        "'replace' operation instead.") % p['path']
-                raise wsme.exc.ClientSideError(msg)
-    return jsonpatch.apply_patch(doc, patch)
 
 
 def get_resource(resource, resource_ident):
@@ -85,11 +66,13 @@ def get_resource(resource, resource_ident):
     :returns: The resource.
     """
     resource = getattr(objects, resource)
-
+    context = pecan.request.context
+    if context.is_admin:
+        context.all_projects = True
     if uuidutils.is_uuid_like(resource_ident):
-        return resource.get_by_uuid(pecan.request.context, resource_ident)
+        return resource.get_by_uuid(context, resource_ident)
 
-    return resource.get_by_name(pecan.request.context, resource_ident)
+    return resource.get_by_name(context, resource_ident)
 
 
 def _do_enforce_content_types(pecan_req, valid_content_types):
@@ -114,6 +97,7 @@ def enforce_content_types(valid_content_types):
 
     def content_types_decorator(fn):
 
+        @functools.wraps(fn)
         def content_types_enforcer(inst, *args, **kwargs):
             _do_enforce_content_types(pecan.request, valid_content_types)
             return fn(inst, *args, **kwargs)
@@ -121,3 +105,18 @@ def enforce_content_types(valid_content_types):
         return content_types_enforcer
 
     return content_types_decorator
+
+
+def version_check(action, version):
+    """Check whether the current version supports the operation.
+
+    :param action: Operations to be executed.
+    :param version: The minimum version required to perform the operation.
+
+    """
+    req_version = pecan.request.version
+    min_version = versions.Version('', '', '', version)
+    if req_version < min_version:
+        raise exception.InvalidParamInVersion(param=action,
+                                              req_version=req_version,
+                                              min_version=min_version)

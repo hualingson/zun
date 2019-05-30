@@ -13,27 +13,32 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import shlex
+
 from neutronclient.common import exceptions as n_exc
 from oslo_log import log as logging
 from oslo_utils import strutils
 from oslo_utils import uuidutils
 import pecan
+import six
 
 from zun.api.controllers import base
 from zun.api.controllers import link
 from zun.api.controllers.v1 import collection
 from zun.api.controllers.v1.schemas import containers as schema
+from zun.api.controllers.v1.views import actions_view
 from zun.api.controllers.v1.views import containers_view as view
-from zun.api.controllers import versions
 from zun.api import utils as api_utils
+from zun.api import validation
 from zun.common import consts
 from zun.common import context as zun_context
 from zun.common import exception
 from zun.common.i18n import _
 from zun.common import name_generator
+from zun.common.policies import container as policies
 from zun.common import policy
+from zun.common import quota
 from zun.common import utils
-from zun.common import validation
 import zun.conf
 from zun.network import model as network_model
 from zun.network import neutron
@@ -43,7 +48,7 @@ from zun.volume import cinder_api as cinder
 
 CONF = zun.conf.CONF
 LOG = logging.getLogger(__name__)
-NETWORK_ATTACH_EXTERNAL = 'network:attach_external_network'
+QUOTAS = quota.QUOTAS
 
 
 def check_policy_on_container(container, action):
@@ -68,11 +73,59 @@ class ContainerCollection(collection.Collection):
     @staticmethod
     def convert_with_links(rpc_containers, limit, url=None,
                            expand=False, **kwargs):
+        context = pecan.request.context
         collection = ContainerCollection()
         collection.containers = \
-            [view.format_container(url, p) for p in rpc_containers]
+            [view.format_container(context, url, p)
+             for p in rpc_containers]
         collection.next = collection.get_next(limit, url=url, **kwargs)
         return collection
+
+
+class ContainersActionsController(base.Controller):
+    """Controller for Container Actions."""
+
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def get_all(self, container_ident, **kwargs):
+        """Retrieve a list of container actions."""
+        context = pecan.request.context
+        policy.enforce(context, "container:actions",
+                       action="container:actions")
+        container = utils.get_container(container_ident)
+        actions_raw = objects.ContainerAction.get_by_container_uuid(
+            context, container.uuid)
+        actions = [actions_view.format_action(a) for a in actions_raw]
+
+        return {"containerActions": actions}
+
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def get_one(self, container_ident, request_ident, **kwargs):
+        """Retrieve information about the action."""
+
+        context = pecan.request.context
+        policy.enforce(context, "container:actions",
+                       action="container:actions")
+        container = utils.get_container(container_ident)
+        action = objects.ContainerAction.get_by_request_id(
+            context, container.uuid, request_ident)
+
+        if action is None:
+            raise exception.ResourceNotFound(name="Action", id=request_ident)
+
+        action_id = action.id
+        action = actions_view.format_action(action)
+        show_traceback = False
+        if policy.enforce(context, "container:action:events",
+                          do_raise=False, action="container:action:events"):
+            show_traceback = True
+
+        events_raw = objects.ContainerActionEvent.get_by_action(context,
+                                                                action_id)
+        action['events'] = [actions_view.format_event(evt, show_traceback)
+                            for evt in events_raw]
+        return action
 
 
 class ContainersController(base.Controller):
@@ -82,6 +135,7 @@ class ContainersController(base.Controller):
         'start': ['POST'],
         'stop': ['POST'],
         'reboot': ['POST'],
+        'rebuild': ['POST'],
         'pause': ['POST'],
         'unpause': ['POST'],
         'logs': ['GET'],
@@ -91,6 +145,7 @@ class ContainersController(base.Controller):
         'rename': ['POST'],
         'attach': ['GET'],
         'resize': ['POST'],
+        'resize_container': ['POST'],
         'top': ['GET'],
         'get_archive': ['GET'],
         'put_archive': ['POST'],
@@ -99,8 +154,11 @@ class ContainersController(base.Controller):
         'add_security_group': ['POST'],
         'network_detach': ['POST'],
         'network_attach': ['POST'],
+        'network_list': ['GET'],
         'remove_security_group': ['POST']
     }
+
+    container_actions = ContainersActionsController()
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -119,27 +177,39 @@ class ContainersController(base.Controller):
             policy.enforce(context, "container:get_all_all_projects",
                            action="container:get_all_all_projects")
             context.all_projects = True
-        limit = api_utils.validate_limit(kwargs.get('limit'))
-        sort_dir = api_utils.validate_sort_dir(kwargs.get('sort_dir', 'asc'))
-        sort_key = kwargs.get('sort_key', 'id')
-        resource_url = kwargs.get('resource_url')
-        expand = kwargs.get('expand')
+        kwargs.pop('all_projects', None)
+        limit = api_utils.validate_limit(kwargs.pop('limit', None))
+        sort_dir = api_utils.validate_sort_dir(kwargs.pop('sort_dir', 'asc'))
+        sort_key = kwargs.pop('sort_key', 'id')
+        resource_url = kwargs.pop('resource_url', None)
+        expand = kwargs.pop('expand', None)
 
-        filters = None
+        container_allowed_filters = ['name', 'image', 'project_id', 'user_id',
+                                     'memory', 'host', 'task_state', 'status',
+                                     'auto_remove']
+        filters = {}
+        for filter_key in container_allowed_filters:
+            if filter_key in kwargs:
+                policy_action = policies.CONTAINER % ('get_one:' + filter_key)
+                context.can(policy_action, might_not_exist=True)
+                filter_value = kwargs.pop(filter_key)
+                filters[filter_key] = filter_value
         marker_obj = None
-        marker = kwargs.get('marker')
+        marker = kwargs.pop('marker', None)
         if marker:
             marker_obj = objects.Container.get_by_uuid(context,
                                                        marker)
+        if kwargs:
+            unknown_params = [str(k) for k in kwargs]
+            msg = _("Unknown parameters: %s") % ", ".join(unknown_params)
+            raise exception.InvalidValue(msg)
+
         containers = objects.Container.list(context,
                                             limit,
                                             marker_obj,
                                             sort_key,
                                             sort_dir,
                                             filters=filters)
-        if not context.is_admin:
-            for container in containers:
-                del container.host
         return ContainerCollection.convert_with_links(containers, limit,
                                                       url=resource_url,
                                                       expand=expand,
@@ -160,15 +230,15 @@ class ContainersController(base.Controller):
             context.all_projects = True
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:get_one")
-        compute_api = pecan.request.compute_api
-        try:
-            container = compute_api.container_show(context, container)
-        except exception.ContainerHostNotUp:
-            raise exception.ServerNotUsable
+        if container.host:
+            compute_api = pecan.request.compute_api
+            try:
+                container = compute_api.container_show(context, container)
+            except exception.ContainerHostNotUp:
+                raise exception.ServerNotUsable
 
-        if not context.is_admin:
-            del container.host
-        return view.format_container(pecan.request.host_url, container)
+        return view.format_container(context, pecan.request.host_url,
+                                     container)
 
     def _generate_name_for_container(self):
         """Generate a random name like: zeta-22-container."""
@@ -176,12 +246,34 @@ class ContainersController(base.Controller):
         name = name_gen.generate()
         return name + '-container'
 
+    @base.Controller.api_version("1.1", "1.19")
+    @pecan.expose('json')
+    @api_utils.enforce_content_types(['application/json'])
+    @exception.wrap_pecan_controller_exception
+    @validation.validate_query_param(pecan.request, schema.query_param_create)
+    @validation.validated(schema.legacy_container_create)
+    def post(self, run=False, **container_dict):
+        # NOTE(hongbin): We convert the representation of 'command' from
+        # string to list. For example:
+        # '"nginx" "-g" "daemon off;"' -> ["nginx", "-g", "daemon off;"]
+        command = container_dict.pop('command', None)
+        if command is not None:
+            if isinstance(command, six.string_types):
+                command = shlex.split(command)
+            container_dict['command'] = command
+
+        return self._do_post(run, **container_dict)
+
+    @base.Controller.api_version("1.20")  # noqa
     @pecan.expose('json')
     @api_utils.enforce_content_types(['application/json'])
     @exception.wrap_pecan_controller_exception
     @validation.validate_query_param(pecan.request, schema.query_param_create)
     @validation.validated(schema.container_create)
     def post(self, run=False, **container_dict):
+        return self._do_post(run, **container_dict)
+
+    def _do_post(self, run=False, **container_dict):
         """Create or run a new container.
 
         :param run: if true, starts the container
@@ -206,90 +298,113 @@ class ContainersController(base.Controller):
             container_dict['interactive'] = strutils.bool_from_string(
                 container_dict.get('interactive', False), strict=True)
         except ValueError:
-            raise exception.InvalidValue(_('Valid run or interactive values '
-                                           'are: true, false, True, False'))
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid run or interactive '
+                                           'values are: %s') % bools)
+
+        # Check container quotas
+        self._check_container_quotas(context, container_dict)
 
         auto_remove = container_dict.pop('auto_remove', None)
         if auto_remove is not None:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.3')
-            if req_version >= min_version:
-                try:
-                    container_dict['auto_remove'] = strutils.bool_from_string(
-                        auto_remove, strict=True)
-                except ValueError:
-                    raise exception.InvalidValue(_('Auto_remove values are: '
-                                                   'true, false, True, False'))
-            else:
-                raise exception.InvalidParamInVersion(param='auto_remove',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+            api_utils.version_check('auto_remove', '1.3')
+            try:
+                container_dict['auto_remove'] = strutils.bool_from_string(
+                    auto_remove, strict=True)
+            except ValueError:
+                bools = ', '.join(strutils.TRUE_STRINGS +
+                                  strutils.FALSE_STRINGS)
+                raise exception.InvalidValue(_('Valid auto_remove '
+                                               'values are: %s') % bools)
 
         runtime = container_dict.pop('runtime', None)
         if runtime is not None:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.5')
-            if req_version >= min_version:
-                container_dict['runtime'] = runtime
-            else:
-                raise exception.InvalidParamInVersion(param='runtime',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+            api_utils.version_check('runtime', '1.5')
+            policy.enforce(context, "container:create:runtime",
+                           action="container:create:runtime")
+            container_dict['runtime'] = runtime
 
         hostname = container_dict.pop('hostname', None)
         if hostname is not None:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.9')
-            if req_version >= min_version:
-                container_dict['hostname'] = hostname
-            else:
-                raise exception.InvalidParamInVersion(param='hostname',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+            api_utils.version_check('hostname', '1.9')
+            container_dict['hostname'] = hostname
 
         nets = container_dict.get('nets', [])
         requested_networks = utils.build_requested_networks(context, nets)
         pci_req = self._create_pci_requests_for_sriov_ports(context,
                                                             requested_networks)
 
+        healthcheck = container_dict.pop('healthcheck', {})
+        if healthcheck:
+            api_utils.version_check('healthcheck', '1.22')
+            healthcheck['test'] = healthcheck.pop('cmd', '')
+            container_dict['healthcheck'] = healthcheck
+
         mounts = container_dict.pop('mounts', [])
         if mounts:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.11')
-            if req_version < min_version:
-                raise exception.InvalidParamInVersion(param='mounts',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+            api_utils.version_check('mounts', '1.11')
 
-        requested_volumes = self._build_requested_volumes(context, mounts)
+        cpu_policy = container_dict.pop('cpu_policy', None)
+        container_dict['cpu_policy'] = cpu_policy
+
+        privileged = container_dict.pop('privileged', None)
+        if privileged is not None:
+            api_utils.version_check('privileged', '1.21')
+            policy.enforce(context, "container:create:privileged",
+                           action="container:create:privileged")
+            try:
+                container_dict['privileged'] = strutils.bool_from_string(
+                    privileged, strict=True)
+            except ValueError:
+                bools = ', '.join(strutils.TRUE_STRINGS +
+                                  strutils.FALSE_STRINGS)
+                raise exception.InvalidValue(_('Valid privileged values '
+                                               'are: %s') % bools)
 
         # Valiadtion accepts 'None' so need to convert it to None
-        if container_dict.get('image_driver'):
-            container_dict['image_driver'] = api_utils.string_or_none(
-                container_dict.get('image_driver'))
+        container_dict['image_driver'] = api_utils.string_or_none(
+            container_dict.get('image_driver'))
+        if not container_dict['image_driver']:
+            container_dict['image_driver'] = CONF.default_image_driver
+        if container_dict.get('image_pull_policy'):
+            policy.enforce(context, "container:create:image_pull_policy",
+                           action="container:create:image_pull_policy")
 
         container_dict['project_id'] = context.project_id
         container_dict['user_id'] = context.user_id
         name = container_dict.get('name') or \
             self._generate_name_for_container()
         container_dict['name'] = name
-        if container_dict.get('memory'):
-            container_dict['memory'] = \
-                str(container_dict['memory']) + 'M'
+        self._set_default_resource_limit(container_dict)
         if container_dict.get('restart_policy'):
             utils.check_for_restart_policy(container_dict)
+
+        exposed_ports = container_dict.pop('exposed_ports', None)
+        if exposed_ports is not None:
+            api_utils.version_check('exposed_ports', '1.24')
+            exposed_ports = utils.build_exposed_ports(exposed_ports)
+            container_dict['exposed_ports'] = exposed_ports
+
+        registry = container_dict.pop('registry', None)
+        if registry:
+            api_utils.version_check('registry', '1.31')
+            registry = utils.get_registry(registry)
+            container_dict['registry_id'] = registry.id
 
         container_dict['status'] = consts.CREATING
         extra_spec = {}
         extra_spec['hints'] = container_dict.get('hints', None)
         extra_spec['pci_requests'] = pci_req
+        extra_spec['availability_zone'] = container_dict.get(
+            'availability_zone')
         new_container = objects.Container(context, **container_dict)
         new_container.create(context)
 
         kwargs = {}
         kwargs['extra_spec'] = extra_spec
         kwargs['requested_networks'] = requested_networks
-        kwargs['requested_volumes'] = requested_volumes
+        kwargs['requested_volumes'] = (
+            self._build_requested_volumes(context, new_container, mounts))
         if pci_req.requests:
             kwargs['pci_requests'] = pci_req
         kwargs['run'] = run
@@ -298,7 +413,58 @@ class ContainersController(base.Controller):
         pecan.response.location = link.build_url('containers',
                                                  new_container.uuid)
         pecan.response.status = 202
-        return view.format_container(pecan.request.host_url, new_container)
+        return view.format_container(context, pecan.request.host_url,
+                                     new_container)
+
+    def _check_container_quotas(self, context, container_delta_dict,
+                                update_container=False):
+        deltas = {
+            'containers': 0 if update_container else 1,
+            'cpu': container_delta_dict.get('cpu', 0),
+            'memory': container_delta_dict.get('memory', 0),
+            'disk': container_delta_dict.get('disk', 0)
+        }
+
+        def _check_deltas(context, deltas):
+            """Check usage deltas against quota limits.
+
+            This does QUOTAS.count() followed by a QUOTAS.limit_check()
+            using the provided deltas.
+
+            :param context: The request context, for access check.
+            :param deltas: A dict of {resource_name: delta, ...} to check
+                           against the quota limits.
+            """
+            check_kwargs = {}
+            count_as_dict = {}
+            project_id = context.project_id
+            for res_name, res_delta in deltas.items():
+                # TODO(kiennt): Apply count_as_dict method, query count usage
+                #               once rather than count each resource.
+                count_as_dict[res_name] = QUOTAS.count(context, res_name,
+                                                       project_id)
+                total = None
+                try:
+                    if isinstance(count_as_dict[res_name], six.integer_types):
+                        total = count_as_dict[res_name] + int(res_delta)
+                    else:
+                        total = float(count_as_dict[res_name]) + \
+                            float(res_delta)
+                except TypeError as e:
+                    raise e
+                check_kwargs[res_name] = total
+            QUOTAS.limit_check(context, project_id, **check_kwargs)
+
+        _check_deltas(context, deltas)
+
+    def _set_default_resource_limit(self, container_dict):
+        # NOTE(kiennt): Default disk size will be set later.
+        container_dict['disk'] = container_dict.get('disk')
+        container_dict['memory'] = container_dict.get(
+            'memory', CONF.default_memory)
+        container_dict['memory'] = str(container_dict['memory'])
+        container_dict['cpu'] = container_dict.get(
+            'cpu', CONF.default_cpu)
 
     def _create_pci_requests_for_sriov_ports(self, context,
                                              requested_networks):
@@ -364,7 +530,6 @@ class ContainersController(base.Controller):
         return result.get('port')
 
     def _get_phynet_info(self, context, net_id):
-        phynet_name = None
         # NOTE(hongbin): Use admin context here because non-admin users are
         # unable to retrieve provider:* attributes.
         admin_context = zun_context.get_admin_context()
@@ -375,28 +540,40 @@ class ContainersController(base.Controller):
         phynet_name = net.get('provider:physical_network')
         return phynet_name
 
-    def _build_requested_volumes(self, context, mounts):
-        # NOTE(hongbin): We assume cinder is the only volume provider here.
-        # The logic needs to be re-visited if a second volume provider
-        # (i.e. Manila) is introduced.
+    def _build_requested_volumes(self, context, container, mounts):
         cinder_api = cinder.CinderAPI(context)
-        requested_volumes = []
+        requested_volumes = {container.uuid: []}
         for mount in mounts:
-            if mount.get('source'):
-                volume = cinder_api.search_volume(mount['source'])
-                auto_remove = False
-            else:
-                volume = cinder_api.create_volume(mount['size'])
-                auto_remove = True
-            cinder_api.ensure_volume_usable(volume)
-            volmapp = objects.VolumeMapping(
-                context,
-                volume_id=volume.id, volume_provider='cinder',
-                container_path=mount['destination'],
-                user_id=context.user_id,
-                project_id=context.project_id,
-                auto_remove=auto_remove)
-            requested_volumes.append(volmapp)
+            volume_dict = {
+                'cinder_volume_id': None,
+                'container_path': None,
+                'auto_remove': False,
+                'contents': None,
+                'user_id': context.user_id,
+                'project_id': context.project_id,
+            }
+            volume_type = mount.get('type', 'volume')
+            if volume_type == 'volume':
+                if mount.get('source'):
+                    volume = cinder_api.search_volume(mount['source'])
+                    cinder_api.ensure_volume_usable(volume)
+                    volume_dict['cinder_volume_id'] = volume.id
+                    volume_dict['container_path'] = mount['destination']
+                    volume_dict['volume_provider'] = 'cinder'
+                elif mount.get('size'):
+                    volume = cinder_api.create_volume(mount['size'])
+                    cinder_api.ensure_volume_usable(volume)
+                    volume_dict['cinder_volume_id'] = volume.id
+                    volume_dict['container_path'] = mount['destination']
+                    volume_dict['volume_provider'] = 'cinder'
+                    volume_dict['auto_remove'] = True
+            elif volume_type == 'bind':
+                volume_dict['contents'] = mount.pop('source', '')
+                volume_dict['container_path'] = mount['destination']
+                volume_dict['volume_provider'] = 'local'
+
+            volmapp = objects.VolumeMapping(context, **volume_dict)
+            requested_volumes[container.uuid].append(volmapp)
 
         return requested_volumes
 
@@ -418,6 +595,7 @@ class ContainersController(base.Controller):
             else:
                 raise
 
+    @base.Controller.api_version("1.1", "1.14")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     @validation.validated(schema.add_security_group)
@@ -445,6 +623,7 @@ class ContainersController(base.Controller):
                                        security_group_id)
         pecan.response.status = 202
 
+    @base.Controller.api_version("1.1", "1.14")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     @validation.validated(schema.remove_security_group)
@@ -480,17 +659,35 @@ class ContainersController(base.Controller):
         :param patch: a json PATCH document to apply to this container.
         """
         container = utils.get_container(container_ident)
+        context = pecan.request.context
+        container_deltas = {}
         check_policy_on_container(container.as_dict(), "container:update")
         utils.validate_container_state(container, 'update')
         if 'memory' in patch:
-            patch['memory'] = str(patch['memory']) + 'M'
+            container_deltas['memory'] = \
+                int(patch['memory']) - int(container.memory)
+            patch['memory'] = str(patch['memory'])
         if 'cpu' in patch:
             patch['cpu'] = float(patch['cpu'])
-        context = pecan.request.context
-        compute_api = pecan.request.compute_api
-        container = compute_api.container_update(context, container, patch)
-        return view.format_container(pecan.request.host_url, container)
+            container_deltas['cpu'] = patch['cpu'] - container.cpu
+        if 'name' in patch:
+            patch['name'] = str(patch['name'])
 
+        if 'memory' not in patch and 'cpu' not in patch:
+            for field, patch_val in patch.items():
+                if getattr(container, field) != patch_val:
+                    setattr(container, field, patch_val)
+            container.save(context)
+        else:
+            # Check container quotas
+            self._check_container_quotas(context, container_deltas,
+                                         update_container=True)
+            compute_api = pecan.request.compute_api
+            container = compute_api.container_update(context, container, patch)
+        return view.format_container(context, pecan.request.host_url,
+                                     container)
+
+    @base.Controller.api_version("1.1", "1.13")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     @validation.validate_query_param(pecan.request, schema.query_param_rename)
@@ -498,7 +695,7 @@ class ContainersController(base.Controller):
         """Rename an existing container.
 
         :param container_ident: UUID or Name of a container.
-        :param patch: a json PATCH document to apply to this container.
+        :param name: a new name for this container.
         """
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:rename")
@@ -508,7 +705,33 @@ class ContainersController(base.Controller):
         container.name = name
         context = pecan.request.context
         container.save(context)
-        return view.format_container(pecan.request.host_url, container)
+        return view.format_container(context, pecan.request.host_url,
+                                     container)
+
+    @base.Controller.api_version("1.19")
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    @validation.validated(schema.container_update)
+    def resize_container(self, container_ident, **kwargs):
+        """Resize an existing container.
+
+        :param container_ident: UUID or name of a container.
+        :param kwargs: cpu/memory to be updated.
+        """
+        container = utils.get_container(container_ident)
+        check_policy_on_container(container.as_dict(),
+                                  "container:resize_container")
+        utils.validate_container_state(container, 'resize_container')
+        if 'memory' in kwargs:
+            kwargs['memory'] = str(kwargs['memory'])
+        if 'cpu' in kwargs:
+            kwargs['cpu'] = float(kwargs['cpu'])
+        context = pecan.request.context
+        compute_api = pecan.request.compute_api
+        compute_api.resize_container(context, container, kwargs)
+        pecan.response.status = 202
+        return view.format_container(context, pecan.request.host_url,
+                                     container)
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -526,53 +749,63 @@ class ContainersController(base.Controller):
             context.all_projects = True
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:delete")
-        try:
-            force = strutils.bool_from_string(force, strict=True)
-        except ValueError:
-            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
-            raise exception.InvalidValue(_('Valid force values are: %s')
-                                         % bools)
         stop = kwargs.pop('stop', False)
         try:
+            force = strutils.bool_from_string(force, strict=True)
             stop = strutils.bool_from_string(stop, strict=True)
         except ValueError:
             bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
-            raise exception.InvalidValue(_('Valid stop values are: %s')
-                                         % bools)
+            raise exception.InvalidValue(_('Valid force or stop values '
+                                           'are: %s') % bools)
         compute_api = pecan.request.compute_api
         if not force and not stop:
             utils.validate_container_state(container, 'delete')
         elif force and not stop:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.7')
-            if req_version >= min_version:
-                policy.enforce(context, "container:delete_force",
-                               action="container:delete_force")
-                utils.validate_container_state(container, 'delete_force')
-            else:
-                raise exception.InvalidParamInVersion(param='force',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+            api_utils.version_check('force', '1.7')
+            policy.enforce(context, "container:delete_force",
+                           action="container:delete_force")
+            utils.validate_container_state(container, 'delete_force')
         elif stop:
-            req_version = pecan.request.version
-            min_version = versions.Version('', '', '', '1.12')
-            if req_version >= min_version:
+            api_utils.version_check('stop', '1.12')
+            utils.validate_container_state(container,
+                                           'delete_after_stop')
+            if container.status == consts.RUNNING:
                 check_policy_on_container(container.as_dict(),
                                           "container:stop")
-                utils.validate_container_state(container,
-                                               'delete_after_stop')
-                if container.status == consts.RUNNING:
-                    LOG.debug('Calling compute.container_stop with %s '
-                              'before delete',
-                              container.uuid)
-                    compute_api.container_stop(context, container, 10)
-            else:
-                raise exception.InvalidParamInVersion(param='stop',
-                                                      req_version=req_version,
-                                                      min_version=min_version)
+                LOG.debug('Calling compute.container_stop with %s '
+                          'before delete', container.uuid)
+                compute_api.container_stop(context, container, 10)
         container.status = consts.DELETING
-        compute_api.container_delete(context, container, force)
+        if container.host:
+            compute_api.container_delete(context, container, force)
+        else:
+            container.destroy(context)
         pecan.response.status = 204
+
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def rebuild(self, container_ident, **kwargs):
+        """Rebuild container.
+
+        :param container_ident: UUID or Name of a container.
+        """
+        container = utils.get_container(container_ident)
+        check_policy_on_container(container.as_dict(), "container:rebuild")
+        utils.validate_container_state(container, 'rebuild')
+        if kwargs.get('image'):
+            container.image = kwargs.get('image')
+        if kwargs.get('image_driver'):
+            utils.validate_image_driver(kwargs.get('image_driver'))
+            container.image_driver = kwargs.get('image_driver')
+        LOG.debug('Calling compute.container_rebuild with %s',
+                  container.uuid)
+        run = True if container.status == consts.RUNNING else False
+        context = pecan.request.context
+        container.status = consts.REBUILDING
+        container.save(context)
+        compute_api = pecan.request.compute_api
+        compute_api.container_rebuild(context, container, run)
+        pecan.response.status = 202
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -623,6 +856,8 @@ class ContainersController(base.Controller):
         LOG.debug('Calling compute.container_reboot with %s',
                   container.uuid)
         context = pecan.request.context
+        container.status = consts.RESTARTING
+        container.save(context)
         compute_api = pecan.request.compute_api
         compute_api.container_reboot(context, container, timeout)
         pecan.response.status = 202
@@ -670,7 +905,7 @@ class ContainersController(base.Controller):
 
         :param container_ident: UUID or Name of a container.
         :param stdout: Get standard output if True.
-        :param sterr: Get standard error if True.
+        :param stderr: Get standard error if True.
         :param timestamps: Show timestamps.
         :param tail: Number of lines to show from the end of the logs.
                      (default: get all logs)
@@ -821,6 +1056,7 @@ class ContainersController(base.Controller):
         compute_api = pecan.request.compute_api
         return compute_api.container_top(context, container, ps_args)
 
+    @base.Controller.api_version("1.1", "1.24")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     def get_archive(self, container_ident, **kwargs):
@@ -830,6 +1066,23 @@ class ContainersController(base.Controller):
         form of a tar archive.
         :param container_ident: UUID or Name of a container.
         """
+        kwargs['encode_data'] = False
+        return self._get_archive(container_ident, **kwargs)
+
+    @base.Controller.api_version("1.25")  # noqa
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def get_archive(self, container_ident, **kwargs):
+        """Retrieve a file/folder from a container
+
+        Retrieve a file or folder from a container in the
+        form of a tar archive.
+        :param container_ident: UUID or Name of a container.
+        """
+        kwargs['encode_data'] = True
+        return self._get_archive(container_ident, **kwargs)
+
+    def _get_archive(self, container_ident, **kwargs):
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:get_archive")
         utils.validate_container_state(container, 'get_archive')
@@ -839,9 +1092,10 @@ class ContainersController(base.Controller):
         context = pecan.request.context
         compute_api = pecan.request.compute_api
         data, stat = compute_api.container_get_archive(
-            context, container, kwargs['path'])
+            context, container, kwargs['path'], kwargs['encode_data'])
         return {"data": data, "stat": stat}
 
+    @base.Controller.api_version("1.1", "1.24")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     def put_archive(self, container_ident, **kwargs):
@@ -851,6 +1105,23 @@ class ContainersController(base.Controller):
         a tar archive as source.
         :param container_ident: UUID or Name of a container.
         """
+        kwargs['decode_data'] = False
+        self._put_archive(container_ident, **kwargs)
+
+    @base.Controller.api_version("1.25")  # noqa
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def put_archive(self, container_ident, **kwargs):
+        """Insert a file/folder to container.
+
+        Insert a file or folder to an existing container using
+        a tar archive as source.
+        :param container_ident: UUID or Name of a container.
+        """
+        kwargs['decode_data'] = True
+        self._put_archive(container_ident, **kwargs)
+
+    def _put_archive(self, container_ident, **kwargs):
         container = utils.get_container(container_ident)
         check_policy_on_container(container.as_dict(), "container:put_archive")
         utils.validate_container_state(container, 'put_archive')
@@ -859,8 +1130,9 @@ class ContainersController(base.Controller):
                   {'uuid': container.uuid, 'path': kwargs['path']})
         context = pecan.request.context
         compute_api = pecan.request.compute_api
-        compute_api.container_put_archive(context, container,
-                                          kwargs['path'], kwargs['data'])
+        compute_api.container_put_archive(
+            context, container, kwargs['path'], kwargs['data'],
+            kwargs['decode_data'])
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -911,14 +1183,34 @@ class ContainersController(base.Controller):
         context = pecan.request.context
         compute_api = pecan.request.compute_api
         neutron_api = neutron.NeutronAPI(context)
-        neutron_net = neutron_api.get_neutron_network(kwargs.get('network'))
-        compute_api.network_detach(context, container, neutron_net['id'])
+        if kwargs.get('port'):
+            port = neutron_api.get_neutron_port(kwargs['port'])
+            net_id = port['network_id']
+            if (net_id not in container.addresses or
+                    port['id'] not in [a['port']
+                                       for a in container.addresses[net_id]]):
+                raise exception.Invalid(_(
+                    "Port '%(port)s' is not attached to container "
+                    "'%(container)s'.") %
+                    {"port": kwargs.get('port'),
+                     "container": container_ident})
+        else:
+            network = neutron_api.get_neutron_network(kwargs.get('network'))
+            net_id = network['id']
+            if net_id not in container.addresses:
+                raise exception.Invalid(_(
+                    "Network '%(network)s' is not attached to container "
+                    "'%(container)s'.") %
+                    {"network": kwargs.get('network'),
+                     "container": container_ident})
+        compute_api.network_detach(context, container, net_id)
         pecan.response.status = 202
 
     @base.Controller.api_version("1.8")
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
     @validation.validate_query_param(pecan.request, schema.network_attach)
+    @validation.validated(schema.network_attach)
     def network_attach(self, container_ident, **kwargs):
         """Attach a network to the container.
 
@@ -929,6 +1221,76 @@ class ContainersController(base.Controller):
                                   "container:network_attach")
         context = pecan.request.context
         compute_api = pecan.request.compute_api
-        neutron_api = neutron.NeutronAPI(context)
-        neutron_net = neutron_api.get_neutron_network(kwargs.get('network'))
-        compute_api.network_attach(context, container, neutron_net['id'])
+        requested_networks = utils.build_requested_networks(context, [kwargs])
+        if requested_networks[0]['network'] in container.addresses:
+            if kwargs.get('port'):
+                raise exception.Invalid(_(
+                    "Cannot attach port '%(port)s' to container "
+                    "'%(container)s' because another port on the "
+                    "same network is already attached to this container.") %
+                    {"port": kwargs.get('port'),
+                     "container": container_ident})
+            else:
+                raise exception.Invalid(_(
+                    "Network '%(network)s' is already connected to "
+                    "container '%(container)s'.") %
+                    {"network": kwargs.get('network'),
+                     "container": container_ident})
+        compute_api.network_attach(context, container, requested_networks[0])
+
+    @base.Controller.api_version("1.13", "1.17")
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def network_list(self, container_ident):
+        """Retrieve a list of networks of the container.
+
+        :param container_ident: UUID or Name of a container.
+        """
+        container = utils.get_container(container_ident)
+        container_networks = self._get_container_networks_legacy(container)
+        return {'networks': container_networks}
+
+    def _get_container_networks_legacy(self, container):
+        container_networks = []
+        for net_id, net_infos in container.addresses.items():
+            for net_info in net_infos:
+                container_networks.append({
+                    'net_id': net_id,
+                    'subnet_id': net_info.get("subnet_id"),
+                    'port_id': net_info.get("port"),
+                    'version': net_info.get("version"),
+                    'ip_address': net_info.get("addr")
+                })
+        return container_networks
+
+    @base.Controller.api_version("1.18")  # noqa
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def network_list(self, container_ident):
+        """Retrieve a list of networks of the container.
+
+        :param container_ident: UUID or Name of a container.
+        """
+        container = utils.get_container(container_ident)
+        container_networks = self._get_container_networks(container)
+        return {'networks': container_networks}
+
+    def _get_container_networks(self, container):
+        container_networks = []
+        for net_id, net_infos in container.addresses.items():
+            addresses = {}
+            for net_info in net_infos:
+                port_id = net_info["port"]
+                addresses.setdefault(port_id, [])
+                addresses[port_id].append({
+                    'subnet_id': net_info.get("subnet_id"),
+                    'version': net_info.get("version"),
+                    'ip_address': net_info.get("addr")
+                })
+            for port_id, fixed_ips in addresses.items():
+                container_networks.append({
+                    'net_id': net_id,
+                    'port_id': port_id,
+                    'fixed_ips': fixed_ips,
+                })
+        return container_networks

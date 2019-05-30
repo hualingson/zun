@@ -45,7 +45,7 @@ try:
 except cfg.NoSuchOptError as e:
     # Note:work around for zun run against master branch
     # in devstack gate job, as zun not branched yet
-    # verisonobjects kilo/master different version can
+    # versionobjects kilo/master different version can
     # cause issue here. As it changed import group. So
     # add here before branch to prevent gate failure.
     # Bug: #1447873
@@ -97,11 +97,11 @@ def wrap_controller_exception(func, func_server_error, func_client_error):
     """This decorator wraps controllers methods to handle exceptions:
 
     - if an unhandled Exception or a ZunException with an error code >=500
-    is catched, raise a http 5xx ClientSideError and correlates it with a log
-    message
+      is catched, raise a http 5xx ClientSideError and correlates it with a log
+      message
 
     - if a ZunException is catched and its error code is <500, raise a http
-    4xx and logs the excp in debug mode
+      4xx and logs the excp in debug mode
 
     """
     @functools.wraps(func)
@@ -344,6 +344,15 @@ class InvalidParamInVersion(Invalid):
                 'supported from version %(min_version)s')
 
 
+class InvalidQuotaValue(Invalid):
+    message = _("Change would make usage less than 0 for the following "
+                "resources: %(unders)s")
+
+
+class InvalidQuotaMethodUsage(Invalid):
+    message = _("Wrong quota method %(method)s used on resource %(res)s")
+
+
 class PatchError(Invalid):
     message = _("Couldn't apply patch '%(patch)s'. Reason: %(reason)s")
 
@@ -377,6 +386,19 @@ class NetworkNotFound(HTTPNotFound):
     message = _("Neutron network %(network)s could not be found.")
 
 
+class RegistryNotFound(HTTPNotFound):
+    message = _("Registry %(registry)s could not be found.")
+
+
+class NetworkAlreadyExists(ResourceExists):
+    message = _("A network with %(field)s %(value)s already exists.")
+
+    def __init__(self, field, value):
+        self.field = field
+        self.value = value
+        super(NetworkAlreadyExists, self).__init__(field=field, value=value)
+
+
 class PortNotFound(HTTPNotFound):
     message = _("Neutron port %(port)s could not be found.")
 
@@ -391,6 +413,10 @@ class VolumeNotFound(HTTPNotFound):
 
 class ImageNotFound(Invalid):
     message = _("Image %(image)s could not be found.")
+
+
+class OperationNotSupported(ZunException):
+    message = _("The operation is not supported.")
 
 
 class ZunServiceNotFound(HTTPNotFound):
@@ -417,6 +443,11 @@ class ContainerAlreadyExists(ResourceExists):
     message = _("A container with %(field)s %(value)s already exists.")
 
 
+class ExecInstanceAlreadyExists(ResourceExists):
+    message = _("An exec instance with exec_id %(exec_id)s already exists "
+                "in container.")
+
+
 class ComputeNodeAlreadyExists(ResourceExists):
     message = _("A compute node with %(field)s %(value)s already exists.")
 
@@ -439,6 +470,14 @@ class ResourceClassAlreadyExists(ResourceExists):
 
 class VolumeMappingAlreadyExists(ResourceExists):
     message = _("A volume mapping with %(field)s %(value)s already exists.")
+
+
+class VolumeAlreadyExists(ResourceExists):
+    message = _("A volume with %(field)s %(value)s already exists.")
+
+
+class RegistryAlreadyExists(ResourceExists):
+    message = _("A registry with %(field)s %(value)s already exists.")
 
 
 class PortNotUsable(Invalid):
@@ -619,6 +658,10 @@ class InvalidCapsuleTemplate(ZunException):
     message = _("Invalid capsule template: %(reason)s.")
 
 
+class FailedParseStringToJson(ZunException):
+    message = _("Failed parse string to json: %(reason)s.")
+
+
 class ExternalNetworkAttachForbidden(NotAuthorized):
     message = _("It is not allowed to create an interface on "
                 "external network %(network_uuid)s")
@@ -677,3 +720,59 @@ class ContainerActionEventNotFound(ZunException):
 class ServerNotUsable(ZunException):
     message = _("Zun server not usable")
     code = 404
+
+
+class OverQuota(ZunException):
+    message = _("Quota exceeded for resources: %(overs)s")
+    code = 403
+
+
+class QuotaNotFound(NotFound):
+    message = _("Quota could not be found.")
+
+
+class QuotaUsageNotFound(NotFound):
+    message = _("Quota usage could not be found")
+
+
+class ProjectQuotaNotFound(QuotaNotFound):
+    message = _("Quota for project %(project_id)s could not be found.")
+
+
+class QuotaAlreadyExists(ZunException):
+    message = _("Quota already exists for project %(project_id)s, "
+                "resource %(resource)s.")
+
+
+class QuotaClassNotFound(QuotaNotFound):
+    message = _("Quota class %(class_name)s could not be found.")
+
+
+class QuotaResourceUnknown(QuotaNotFound):
+    message = _("Unknow quota resources %(unknown)s.")
+
+
+class Base64Exception(Invalid):
+    message = _("Invalid Base 64 file data")
+
+
+class InvalidEncryptionKey(ZunException):
+    message = _('Can not decrypt data with the auth_encryption_key '
+                'in zun config.')
+
+
+class InvalidReference(ZunException):
+    message = _('invalid reference')
+
+
+class ReferenceInvalidFormat(InvalidReference):
+    message = _('invalid reference format')
+
+
+class NameEmpty(InvalidReference):
+    message = _('repository name must have at least one component')
+
+
+class NameTooLong(InvalidReference):
+    message = _('repository name must not be more than %(length_max)s '
+                'characters')

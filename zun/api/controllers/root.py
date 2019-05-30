@@ -14,7 +14,6 @@ import pecan
 from pecan import rest
 
 from zun.api.controllers import base
-from zun.api.controllers import experimental
 from zun.api.controllers import link
 from zun.api.controllers import v1
 from zun.api.controllers import versions
@@ -57,7 +56,7 @@ class Root(base.APIBase):
         root = Root()
         root.name = "OpenStack Zun API"
         root.description = ("Zun is an OpenStack project which aims to "
-                            "provide container management.")
+                            "provide containers service.")
 
         root.versions = [Version.convert('v1', "CURRENT",
                                          versions.CURRENT_MAX_VER,
@@ -70,14 +69,13 @@ class Root(base.APIBase):
 
 class RootController(rest.RestController):
 
-    _versions = ['v1', 'experimental']
+    _versions = ['v1']
     """All supported API versions"""
 
     _default_version = 'v1'
     """The default API version"""
 
     v1 = v1.Controller()
-    experimental = experimental.Controller()
 
     @pecan.expose('json')
     def get(self):

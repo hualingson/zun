@@ -15,6 +15,7 @@
 
 from oslo_concurrency import processutils
 from oslo_serialization import jsonutils
+import six
 
 from zun.common import exception
 from zun.common import utils
@@ -37,9 +38,11 @@ class Host(object):
         # Replace this call with a more generic call when we obtain other
         # NUMA related data like memory etc.
         cpu_info = self.get_cpu_numa_info()
+        mem_info = self.get_mem_numa_info()
         floating_cpus = utils.get_floating_cpu_set()
         numa_node_obj = []
-        for node, cpuset in cpu_info.items():
+        for cpu, mem_total in zip(cpu_info.items(), mem_info):
+            node, cpuset = cpu
             numa_node = objects.NUMANode()
             if floating_cpus:
                 allowed_cpus = set(cpuset) - (floating_cpus & set(cpuset))
@@ -51,6 +54,8 @@ class Host(object):
             # in nature.
             numa_node.cpuset = allowed_cpus
             numa_node.pinned_cpus = set([])
+            numa_node.mem_total = mem_total
+            numa_node.mem_available = mem_total
             numa_node_obj.append(numa_node)
         numa_topo_obj.nodes = numa_node_obj
 
@@ -85,8 +90,9 @@ class Host(object):
                 columns = line.split()
                 address = columns[0]
                 addresses.append(address)
-        except processutils.ProcessExecutionError:
-            raise exception.CommandError(cmd='lspci')
+        except processutils.ProcessExecutionError as e:
+            raise exception.CommandError(cmd='lspci',
+                                         error=six.text_type(e))
 
         pci_info = []
         for addr in addresses:

@@ -13,10 +13,11 @@
 
 import hashlib
 import os
-import six
+import types
 
 from oslo_log import log as logging
 from oslo_utils import fileutils
+import six
 
 from zun.common import exception
 from zun.common.i18n import _
@@ -31,17 +32,16 @@ LOG = logging.getLogger(__name__)
 
 
 class GlanceDriver(driver.ContainerImageDriver):
-
     def __init__(self):
         super(GlanceDriver, self).__init__()
 
-    def _search_image_on_host(self, context, repo):
+    def _search_image_on_host(self, context, repo, tag):
         LOG.debug('Searching for image %s locally', repo)
         images_directory = CONF.glance.images_directory
         try:
             # TODO(mkrai): Change this to search image entry in zun db
             #              after the image endpoint is merged.
-            image_meta = utils.find_image(context, repo)
+            image_meta = utils.find_image(context, repo, tag)
         except exception.ImageNotFound:
             return None
         if image_meta:
@@ -55,32 +55,31 @@ class GlanceDriver(driver.ContainerImageDriver):
             else:
                 return None
 
-    def pull_image(self, context, repo, tag, image_pull_policy):
-        # TODO(shubhams): glance driver does not handle tags
-        #              once metadata is stored in db then handle tags
+    def _verify_md5sum_for_image(self, image):
+        image_path = image['path']
+        image_checksum = image['checksum']
+        md5sum = hashlib.md5()
+        with open(image_path, 'rb') as fd:
+            while True:
+                # read 10MB of data each time
+                data = fd.read(10 * 1024 * 1024)
+                if not data:
+                    break
+                md5sum.update(data)
+        md5sum = md5sum.hexdigest()
+        if md5sum == image_checksum:
+            return True
+        return False
+
+    def pull_image(self, context, repo, tag, image_pull_policy, registry):
         image_loaded = False
-        image = self._search_image_on_host(context, repo)
-        if image:
-            image_path = image['path']
-            image_checksum = image['checksum']
-            md5sum = hashlib.md5()
-            with open(image_path, 'rb') as fd:
-                while True:
-                    # read 10MB of data each time
-                    data = fd.read(10 * 1024 * 1024)
-                    if not data:
-                        break
-                    md5sum.update(data)
-            md5sum = md5sum.hexdigest()
-            if md5sum == image_checksum:
-                image_loaded = True
-                return image, image_loaded
+        image = self._search_image_on_host(context, repo, tag)
 
         if not common_utils.should_pull_image(image_pull_policy, bool(image)):
             if image:
-                LOG.debug('Image  %s present locally', repo)
-                image_loaded = True
-                return image, image_loaded
+                if self._verify_md5sum_for_image(image):
+                    image_loaded = True
+                    return image, image_loaded
             else:
                 message = _('Image %s not present with pull policy of Never'
                             ) % repo
@@ -88,7 +87,7 @@ class GlanceDriver(driver.ContainerImageDriver):
 
         LOG.debug('Pulling image from glance %s', repo)
         try:
-            image_meta = utils.find_image(context, repo)
+            image_meta = utils.find_image(context, repo, tag)
             LOG.debug('Image %s was found in glance, downloading now...', repo)
             image_chunks = utils.download_image_in_chunks(context,
                                                           image_meta.id)
@@ -110,15 +109,14 @@ class GlanceDriver(driver.ContainerImageDriver):
             raise exception.ZunException(msg.format(e))
         LOG.debug('Image %(repo)s was downloaded to path : %(path)s',
                   {'repo': repo, 'path': out_path})
-        return {'image': repo, 'path': out_path}, image_loaded
+        image = {'image': image_meta.name, 'tags': image_meta.tags,
+                 'path': out_path}
+        return image, image_loaded
 
     def search_image(self, context, repo, tag, exact_match):
-        # TODO(mkrai): glance driver does not handle tags
-        #       once metadata is stored in db then handle tags
         LOG.debug('Searching image in glance %s', repo)
         try:
-            # TODO(hongbin): find image by both repo and tag
-            return utils.find_images(context, repo, exact_match)
+            return utils.find_images(context, repo, tag, exact_match)
         except Exception as e:
             raise exception.ZunException(six.text_type(e))
 
@@ -148,13 +146,21 @@ class GlanceDriver(driver.ContainerImageDriver):
         """Upload an image."""
         LOG.debug('Uploading an image to glance %s', img_id)
         try:
+            if isinstance(data, types.GeneratorType):
+                # NOTE(kiennt): In Docker-py 3.1.0, get_image
+                #               returns generator - related bugs [1].
+                #               These lines makes image_data readable.
+                # [1] https://bugs.launchpad.net/zun/+bug/1753080
+                data = six.b('').join(data)
+                data = six.BytesIO(data)
+
             return utils.upload_image_data(context, img_id, data)
         except Exception as e:
             raise exception.ZunException(six.text_type(e))
 
-    def delete_image(self, context, img_id):
-        """Delete an image."""
-        LOG.debug('Delete an image %s in glance', img_id)
+    def delete_committed_image(self, context, img_id):
+        """Delete a committed image."""
+        LOG.debug('Delete the committed image %s in glance', img_id)
         try:
             return utils.delete_image(context, img_id)
         except Exception as e:
@@ -163,3 +169,16 @@ class GlanceDriver(driver.ContainerImageDriver):
                           img_id,
                           six.text_type(e))
             raise exception.ZunException(six.text_type(e))
+
+    def delete_image_tar(self, context, image):
+        """Delete image tar file that pull from glance"""
+        repo = image.split(':')[0]
+        tag = image.split(':')[1]
+        image = self._search_image_on_host(context, repo, tag)
+        if image:
+            tarfile = image.get('path')
+            try:
+                os.unlink(tarfile)
+            except Exception as e:
+                LOG.exception('Cannot delete tar file %s', tarfile)
+                raise exception.ZunException(six.text_type(e))

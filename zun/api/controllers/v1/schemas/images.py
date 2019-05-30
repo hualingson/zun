@@ -10,20 +10,21 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-from zun.common.validation import parameter_types
+from zun.api.controllers.v1.schemas import parameter_types
 
 _image_properties = {
     'image_id': parameter_types.image_id,
     'repo': parameter_types.repo,
     'tag': parameter_types.tag,
     'size': parameter_types.size,
-    'image_pull_policy': parameter_types.image_pull_policy
+    'image_pull_policy': parameter_types.image_pull_policy,
+    'host': parameter_types.image_host,
 }
 
 image_create = {
     'type': 'object',
     'properties': _image_properties,
-    'required': ['repo'],
+    'required': ['repo', 'host'],
     'additionalProperties': False
 }
 

@@ -10,8 +10,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import functools
+
 import copy
-from eventlet.green import threading
 from oslo_context import context
 from oslo_utils import timeutils
 import six
@@ -23,7 +24,7 @@ from zun.common import policy
 class RequestContext(context.RequestContext):
     """Extends security contexts from the OpenStack common library."""
 
-    def __init__(self, auth_token=None, auth_url=None, domain_id=None,
+    def __init__(self, auth_token=None, domain_id=None,
                  domain_name=None, user_name=None, user_id=None,
                  user_domain_name=None, user_domain_id=None,
                  project_name=None, project_id=None, roles=None,
@@ -41,8 +42,8 @@ class RequestContext(context.RequestContext):
 
         """
         super(RequestContext, self).__init__(auth_token=auth_token,
-                                             user=user_name,
-                                             tenant=project_name,
+                                             user_id=user_name,
+                                             project_id=project_name,
                                              is_admin=is_admin,
                                              read_only=read_only,
                                              show_deleted=show_deleted,
@@ -57,7 +58,6 @@ class RequestContext(context.RequestContext):
         self.domain_name = domain_name
         self.user_domain_id = user_domain_id
         self.user_domain_name = user_domain_name
-        self.auth_url = auth_url
         self.auth_token_info = auth_token_info
         self.trust_id = trust_id
         self.all_projects = all_projects
@@ -76,7 +76,6 @@ class RequestContext(context.RequestContext):
     def to_dict(self):
         value = super(RequestContext, self).to_dict()
         value.update({'auth_token': self.auth_token,
-                      'auth_url': self.auth_url,
                       'domain_id': self.domain_id,
                       'domain_name': self.domain_name,
                       'user_domain_id': self.user_domain_id,
@@ -121,7 +120,7 @@ class RequestContext(context.RequestContext):
 
         return context
 
-    def can(self, action, target=None, fatal=True):
+    def can(self, action, target=None, fatal=True, might_not_exist=False):
         """Verifies that the given action is valid on the target in this context.
 
         :param action: string representing the action to be checked.
@@ -132,6 +131,9 @@ class RequestContext(context.RequestContext):
             {'project_id': self.project_id, 'user_id': self.user_id}
         :param fatal: if False, will return False when an
             exception.NotAuthorized occurs.
+        :param might_not_exist: If True the policy check is skipped (and the
+            function returns True) if the specified policy does not exist.
+            Defaults to false.
 
         :raises zun.common.exception.NotAuthorized: if verification fails and
             fatal is True.
@@ -144,7 +146,8 @@ class RequestContext(context.RequestContext):
                       'user_id': self.user_id}
 
         try:
-            return policy.authorize(self, action, target)
+            return policy.authorize(self, action, target,
+                                    might_not_exist=might_not_exist)
         except exception.NotAuthorized:
             if fatal:
                 raise
@@ -168,20 +171,10 @@ def get_admin_context(show_deleted=False, all_projects=False):
     return context
 
 
-_CTX_STORE = threading.local()
-_CTX_KEY = 'current_ctx'
-
-
-def has_ctx():
-    return hasattr(_CTX_STORE, _CTX_KEY)
-
-
-def set_ctx(new_ctx):
-    if not new_ctx and has_ctx():
-        delattr(_CTX_STORE, _CTX_KEY)
-        if hasattr(context._request_store, 'context'):
-            delattr(context._request_store, 'context')
-
-    if new_ctx:
-        setattr(_CTX_STORE, _CTX_KEY, new_ctx)
-        setattr(context._request_store, 'context', new_ctx)
+def set_context(func):
+    @functools.wraps(func)
+    def handler(self, ctx):
+        if ctx is None:
+            ctx = get_admin_context(all_projects=True)
+        func(self, ctx)
+    return handler

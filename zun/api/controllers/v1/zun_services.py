@@ -12,16 +12,20 @@
 
 from oslo_utils import strutils
 import pecan
-import six
 
 from zun.api.controllers import base
 from zun.api.controllers.v1 import collection
 from zun.api.controllers.v1.schemas import services as schema
+from zun.api.controllers.v1.views import services_view as view
 from zun.api import servicegroup as svcgrp_api
+from zun.api import validation
 from zun.common import exception
 from zun.common import policy
-from zun.common import validation
+import zun.conf
 from zun import objects
+
+
+CONF = zun.conf.CONF
 
 
 class ZunServiceCollection(collection.Collection):
@@ -41,11 +45,14 @@ class ZunServiceCollection(collection.Collection):
         collection = ZunServiceCollection()
         collection.services = []
         for p in rpc_hsvcs:
-            hsvc = p.as_dict()
+            service = p.as_dict()
             alive = servicegroup_api.service_is_up(p)
             state = 'up' if alive else 'down'
-            hsvc['state'] = state
-            collection.services.append(hsvc)
+            service['state'] = state
+            service = view.format_service(service)
+            collection.services.append(service)
+            if not service['availability_zone']:
+                service['availability_zone'] = CONF.default_availability_zone
         next = collection.get_next(limit=None, url=None, **kwargs)
         if next is not None:
             collection.next = next
@@ -105,8 +112,10 @@ class ZunServiceController(base.Controller):
         """Set or unset forced_down flag for the service"""
         try:
             forced_down = strutils.bool_from_string(body['forced_down'], True)
-        except ValueError as err:
-            raise exception.InvalidValue(six.text_type(err))
+        except ValueError:
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid forced_down values are: %s')
+                                         % bools)
         self._update(context, body['host'], body['binary'],
                      {"forced_down": forced_down})
         res = {

@@ -29,10 +29,12 @@ from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import orm
 from sqlalchemy import schema
+from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator, TEXT
 
+from zun.common import consts
 import zun.conf
 
 
@@ -122,6 +124,7 @@ class ZunService(Base):
     last_seen_up = Column(DateTime, nullable=True)
     forced_down = Column(Boolean, default=False)
     report_count = Column(Integer, nullable=False, default=0)
+    availability_zone = Column(String(255), nullable=True)
 
 
 class Container(Base):
@@ -140,7 +143,9 @@ class Container(Base):
     name = Column(String(255))
     image = Column(String(255))
     cpu = Column(Float)
-    command = Column(String(255))
+    cpu_policy = Column(String(255), default='shared')
+    cpuset = Column(JSONEncodedDict, nullable=True)
+    command = Column(JSONEncodedList)
     memory = Column(String(255))
     status = Column(String(20))
     status_reason = Column(Text, nullable=True)
@@ -164,6 +169,19 @@ class Container(Base):
     auto_remove = Column(Boolean, default=False)
     runtime = Column(String(32))
     disk = Column(Integer, default=0)
+    auto_heal = Column(Boolean, default=False)
+    capsule_id = Column(Integer,
+                        ForeignKey('container.id', ondelete='CASCADE'))
+    started_at = Column(DateTime)
+    privileged = Column(Boolean, default=False)
+    healthcheck = Column(JSONEncodedDict)
+    exposed_ports = Column(JSONEncodedDict)
+    registry_id = Column(Integer,
+                         ForeignKey('registry.id'),
+                         nullable=True)
+    container_type = Column(Integer, index=True,
+                            default=consts.TYPE_CONTAINER,
+                            server_default=str(consts.TYPE_CONTAINER))
 
 
 class VolumeMapping(Base):
@@ -178,17 +196,60 @@ class VolumeMapping(Base):
     id = Column(Integer, primary_key=True, nullable=False)
     project_id = Column(String(255), nullable=True)
     user_id = Column(String(255), nullable=True)
-    volume_id = Column(String(36), nullable=False)
-    volume_provider = Column(String(36), nullable=False)
+    volume_id = Column(Integer,
+                       ForeignKey('volume.id', ondelete="CASCADE"),
+                       nullable=False)
     container_path = Column(String(255), nullable=True)
     container_uuid = Column(String(36), ForeignKey('container.uuid'))
-    connection_info = Column(MediumText())
     container = orm.relationship(
         Container,
         backref=orm.backref('volume'),
         foreign_keys=container_uuid,
         primaryjoin='and_(VolumeMapping.container_uuid==Container.uuid)')
+
+
+class Volume(Base):
+    """Represents a volume."""
+
+    __tablename__ = 'volume'
+    __table_args__ = (
+        schema.UniqueConstraint('uuid', name='uniq_volume0uuid'),
+        table_args()
+    )
+    uuid = Column(String(36), nullable=False)
+    id = Column(Integer, primary_key=True, nullable=False)
+    project_id = Column(String(255), nullable=True)
+    user_id = Column(String(255), nullable=True)
+    cinder_volume_id = Column(String(36), nullable=True)
+    volume_provider = Column(String(36), nullable=False)
+    connection_info = Column(MediumText())
+    host = Column(String(255), nullable=True)
     auto_remove = Column(Boolean, default=False)
+    contents = Column(MediumText())
+
+
+class ExecInstance(Base):
+    """Represents an exec instance."""
+
+    __tablename__ = 'exec_instance'
+    __table_args__ = (
+        schema.UniqueConstraint(
+            'container_id', 'exec_id',
+            name='uniq_exec_instance0container_id_exec_id'),
+        table_args()
+    )
+    id = Column(Integer, primary_key=True, nullable=False)
+    container_id = Column(Integer,
+                          ForeignKey('container.id', ondelete="CASCADE"),
+                          nullable=False)
+    exec_id = Column(String(255), nullable=False)
+    token = Column(String(255), nullable=True)
+    url = Column(String(255), nullable=True)
+    container = orm.relationship(
+        Container,
+        backref=orm.backref('exec_instances'),
+        foreign_keys=container_id,
+        primaryjoin='and_(ExecInstance.container_id==Container.id)')
 
 
 class Image(Base):
@@ -198,7 +259,7 @@ class Image(Base):
     __table_args__ = (
         schema.UniqueConstraint('repo', 'tag', name='uniq_image0repotag'),
         table_args()
-        )
+    )
     id = Column(Integer, primary_key=True)
     project_id = Column(String(255))
     user_id = Column(String(255))
@@ -207,6 +268,7 @@ class Image(Base):
     repo = Column(String(255))
     tag = Column(String(255))
     size = Column(String(255))
+    host = Column(String(255))
 
 
 class ResourceProvider(Base):
@@ -325,36 +387,13 @@ class ComputeNode(Base):
     # Json string PCI Stats
     # '[{"vendor_id":"8086", "product_id":"1234", "count":3 }, ...]'
     pci_stats = Column(Text)
-
-
-class Capsule(Base):
-    """Represents a capsule."""
-
-    __tablename__ = 'capsule'
-    __table_args__ = (
-        schema.UniqueConstraint('uuid', name='uniq_capsule0uuid'),
-        table_args()
-    )
-    uuid = Column(String(36), nullable=False)
-    id = Column(Integer, primary_key=True, nullable=False)
-    host_selector = Column(String(255))
-    capsule_version = Column(String(255))
-    kind = Column(String(255))
-    restart_policy = Column(JSONEncodedDict)
-    project_id = Column(String(255))
-    user_id = Column(String(255))
-
-    status = Column(String(20))
-    status_reason = Column(Text, nullable=True)
-    meta_labels = Column(JSONEncodedDict)
-    meta_name = Column(String(255))
-    spec = Column(JSONEncodedDict)
-    containers_uuids = Column(JSONEncodedList)
-    cpu = Column(Float)
-    memory = Column(String(255))
-    host = Column(String(255))
-    addresses = Column(JSONEncodedDict)
-    volumes_info = Column(JSONEncodedDict)
+    disk_total = Column(Integer, nullable=False, default=0)
+    disk_used = Column(Integer, nullable=False, default=0)
+    disk_quota_supported = Column(Boolean, nullable=False, default=sql.false(),
+                                  server_default=sql.false())
+    runtimes = Column(JSONEncodedList, nullable=True)
+    enable_cpu_pinning = Column(Boolean, nullable=False, default=sql.false(),
+                                server_default=sql.false())
 
 
 class PciDevice(Base):
@@ -422,7 +461,8 @@ class ContainerAction(Base):
 
     id = Column(Integer, primary_key=True, nullable=False)
     action = Column(String(255))
-    container_uuid = Column(String(36), ForeignKey('container.uuid'),
+    container_uuid = Column(String(36),
+                            ForeignKey('container.uuid', ondelete='CASCADE'),
                             nullable=False)
     request_id = Column(String(255))
     user_id = Column(String(255))
@@ -444,10 +484,103 @@ class ContainerActionEvent(Base):
 
     id = Column(Integer, primary_key=True, nullable=False)
     event = Column(String(255))
-    action_id = Column(Integer, ForeignKey('container_actions.id'),
+    action_id = Column(Integer,
+                       ForeignKey('container_actions.id', ondelete='CASCADE'),
                        nullable=False)
     start_time = Column(DateTime, default=timeutils.utcnow)
     finish_time = Column(DateTime)
     result = Column(String(255))
     traceback = Column(Text)
     details = Column(Text)
+
+
+class Quota(Base):
+    """Represents a single quota override for a project
+
+    If there is no row for a given project id and resource, then the
+    default for the quota class is used. If there is no row for a
+    given quota class and resource, then the default for the deployment
+    is used. If the row is present but the hard limit is None then the
+    resource is unlimited.
+    """
+
+    __tablename__ = 'quotas'
+    __table_args__ = ()
+    id = Column(Integer, primary_key=True, nullable=False)
+    project_id = Column(String(255), index=True)
+    resource = Column(String(255), nullable=False)
+    hard_limit = Column(Integer)
+
+
+class QuotaClass(Base):
+    """Represents a single quota override for a quota class
+
+    If there is no row for a given quota class and resource, then the
+    default for the deployment is used. If the row is present but the
+    hard limit is None, then the resource is unlimited.
+    """
+
+    __tablename__ = 'quota_classes'
+    __table_args__ = (
+        Index('quota_classes_class_name_idx', 'class_name'),
+    )
+    id = Column(Integer, primary_key=True, nullable=False)
+    class_name = Column(String(255))
+    resource = Column(String(255))
+    hard_limit = Column(Integer)
+
+
+class QuotaUsage(Base):
+    """Respents the current usage for a given resource."""
+
+    __tablename__ = 'quota_usages'
+    id = Column(Integer, primary_key=True)
+
+    project_id = Column(String(255), index=True)
+    resource = Column(String(255), index=True)
+
+    in_use = Column(Integer, nullable=False)
+    reserved = Column(Integer, nullable=False)
+
+    @property
+    def total(self):
+        return self.in_use + self.reserved
+
+    until_refresh = Column(Integer, nullable=True)
+
+
+class Network(Base):
+    """Represents a network. """
+
+    __tablename__ = 'network'
+    __table_args__ = (
+        schema.UniqueConstraint('uuid', name='uniq_network0uuid'),
+        schema.UniqueConstraint('neutron_net_id',
+                                name='uniq_network0neutron_net_id'),
+        table_args()
+    )
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255))
+    neutron_net_id = Column(String(255))
+    network_id = Column(String(255))
+    project_id = Column(String(255))
+    user_id = Column(String(255))
+    uuid = Column(String(36))
+
+
+class Registry(Base):
+    """Represents a registry. """
+
+    __tablename__ = 'registry'
+    __table_args__ = (
+        schema.UniqueConstraint('uuid', name='uniq_registry0uuid'),
+        table_args()
+    )
+    id = Column(Integer, primary_key=True)
+    project_id = Column(String(255))
+    user_id = Column(String(255))
+    uuid = Column(String(36))
+    name = Column(String(255))
+    domain = Column(String(255))
+    username = Column(String(255))
+    password = Column(String(255))

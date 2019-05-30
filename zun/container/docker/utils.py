@@ -20,6 +20,7 @@ from docker import errors
 from oslo_serialization import jsonutils
 from oslo_utils import encodeutils
 
+from zun.common import consts
 from zun.common import exception
 from zun.common.i18n import _
 import zun.conf
@@ -72,21 +73,8 @@ class DockerHTTPClient(docker.APIClient):
             tls=ssl_config
         )
 
-    def list_instances(self, inspect=False):
-        """List all containers."""
-        res = []
-        for container in self.containers(all=True):
-            info = self.inspect_container(container['Id'])
-            if not info:
-                continue
-            if inspect:
-                res.append(info)
-            else:
-                res.append(info['Config'].get('Hostname'))
-        return res
-
     def list_containers(self):
-        return self.containers(all=True, filters={'name': 'zun-'})
+        return self.containers(all=True, filters={'name': consts.NAME_PREFIX})
 
     def read_tar_image(self, image):
         image_path = image['path']
@@ -94,9 +82,13 @@ class DockerHTTPClient(docker.APIClient):
             fest = fil.extractfile('manifest.json')
             data = fest.read()
             data = jsonutils.loads(encodeutils.safe_decode(data))
-            repo_tag = data[0]['RepoTags'][0]
-            repo, tag = repo_tag.split(":")
-            image['repo'], image['tag'] = repo, tag
+            repo_tags = data[0]['RepoTags']
+            if repo_tags:
+                repo, tag = repo_tags[0].split(":")
+                image['repo'], image['tag'] = repo, tag
+            else:
+                image_uuid = data[0]['Config'].split('.')[0]
+                image['repo'], image['tag'] = image_uuid, ''
 
     def exec_resize(self, exec_id, height=None, width=None):
         # NOTE(hongbin): This is a temporary work-around for a docker issue
@@ -107,5 +99,5 @@ class DockerHTTPClient(docker.APIClient):
         except errors.APIError as e:
             if "process not found for container" in str(e):
                 raise exception.Invalid(_(
-                    "no such exec instance: %s") % str(e))
+                    "no such exec instance: %s") % six.text_type(e))
             raise

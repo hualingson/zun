@@ -18,10 +18,6 @@ from zun.container import driver
 
 class FakeDriver(driver.ContainerDriver):
     """Fake driver for testing."""
-    capabilities = {
-        "support_sandbox": True,
-        "support_standalone": True,
-    }
 
     def __init__(self):
         super(FakeDriver, self).__init__()
@@ -41,6 +37,16 @@ class FakeDriver(driver.ContainerDriver):
     def images(self, repo, **kwargs):
         pass
 
+    def pull_image(self, context, repo, tag, **kwargs):
+        pass
+
+    def create_image(self, context, image_name, image_driver):
+        pass
+
+    def upload_image_data(self, context, image, image_tag, image_data,
+                          image_driver):
+        pass
+
     def create(self, container):
         pass
 
@@ -51,6 +57,12 @@ class FakeDriver(driver.ContainerDriver):
         pass
 
     def show(self, context, container):
+        pass
+
+    def create_capsule(self, context, capsule, **kwargs):
+        pass
+
+    def delete_capsule(self, context, capsule, **kwargs):
         pass
 
     @check_container_id
@@ -93,12 +105,6 @@ class FakeDriver(driver.ContainerDriver):
     def resize(self, context, container, height, weight):
         pass
 
-    def create_sandbox(self, context, name, **kwargs):
-        pass
-
-    def delete_sandbox(self, context, id):
-        pass
-
     def get_addresses(self, context, container):
         pass
 
@@ -112,3 +118,12 @@ class FakeDriver(driver.ContainerDriver):
 
     def read_tar_image(self, image):
         return image.get('repo'), image.get('tag')
+
+    def check_container_exist(self, context):
+        pass
+
+    def node_support_disk_quota(self):
+        return True
+
+    def get_host_default_base_size(self):
+        return None

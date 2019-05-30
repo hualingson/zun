@@ -14,6 +14,7 @@
 import itertools
 
 from zun.api.controllers import link
+from zun.common.policies import container as policies
 
 _basic_keys = (
     'uuid',
@@ -43,23 +44,38 @@ _basic_keys = (
     'security_groups',
     'auto_remove',
     'runtime',
-    'hostname',
     'disk',
+    'auto_heal',
+    'privileged',
+    'healthcheck',
+    'cpu_policy',
+    'registry_id',
 )
 
 
-def format_container(url, container):
+def format_container(context, url, container):
     def transform(key, value):
         if key not in _basic_keys:
             return
+        # strip the key if it is not allowed by policy
+        policy_action = policies.CONTAINER % ('get_one:%s' % key)
+        if not context.can(policy_action, fatal=False, might_not_exist=True):
+            return
         if key == 'uuid':
             yield ('uuid', value)
-            yield ('links', [link.make_link(
-                'self', url, 'containers', value),
-                link.make_link(
-                    'bookmark', url,
-                    'containers', value,
-                    bookmark=True)])
+            if url:
+                yield ('links', [link.make_link(
+                    'self', url, 'containers', value),
+                    link.make_link(
+                        'bookmark', url,
+                        'containers', value,
+                        bookmark=True)])
+        elif key == 'registry_id':
+            if value:
+                # the value is an internal id so replace it with the
+                # user-facing uuid
+                value = container.registry.uuid
+            yield ('registry_id', value)
         else:
             yield (key, value)
 

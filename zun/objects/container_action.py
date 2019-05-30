@@ -28,7 +28,8 @@ class ContainerAction(base.ZunPersistentObject, base.ZunObject):
 
     # Version 1.0: Initial version
     # Version 1.1: Add uuid column.
-    VERSION = '1.1'
+    # Version 1.2: Remove uuid column.
+    VERSION = '1.2'
 
     fields = {
         'id': fields.IntegerField(),
@@ -37,10 +38,9 @@ class ContainerAction(base.ZunPersistentObject, base.ZunObject):
         'request_id': fields.StringField(nullable=True),
         'user_id': fields.StringField(nullable=True),
         'project_id': fields.StringField(nullable=True),
-        'start_time': fields.DateTimeField(nullable=True),
-        'finish_time': fields.DateTimeField(nullable=True),
+        'start_time': fields.DateTimeField(tzinfo_aware=False, nullable=True),
+        'finish_time': fields.DateTimeField(tzinfo_aware=False, nullable=True),
         'message': fields.StringField(nullable=True),
-        'uuid': fields.StringField(nullable=True),
     }
 
     @staticmethod
@@ -68,10 +68,14 @@ class ContainerAction(base.ZunPersistentObject, base.ZunObject):
         return values
 
     @staticmethod
-    def pack_action_finish(context, container_uuid):
+    def pack_action_finish(context, container_uuid, action_name,
+                           exc_val=None, exc_tb=None):
         values = {'request_id': context.request_id,
                   'container_uuid': container_uuid,
+                  'action': action_name,
                   'finish_time': timeutils.utcnow()}
+        if exc_tb is not None:
+            values['message'] = 'Error'
         return values
 
     @base.remotable_classmethod
@@ -90,8 +94,17 @@ class ContainerAction(base.ZunPersistentObject, base.ZunObject):
             return cls._from_db_object(context, cls(context), db_action)
 
     @base.remotable_classmethod
-    def get_by_container_uuid(cls, context, instance_uuid):
-        db_actions = dbapi.actions_get(context, instance_uuid)
+    def action_finish(cls, context, container_uuid, action_name, exc_val=None,
+                      exc_tb=None, want_result=True):
+        values = cls.pack_action_finish(context, container_uuid, action_name,
+                                        exc_val=exc_val, exc_tb=exc_tb)
+        db_action = dbapi.action_finish(context, values)
+        if want_result:
+            return cls._from_db_object(context, cls(context), db_action)
+
+    @base.remotable_classmethod
+    def get_by_container_uuid(cls, context, container_uuid):
+        db_actions = dbapi.actions_get(context, container_uuid)
         return ContainerAction._from_db_object_list(context, cls, db_actions)
 
 
@@ -103,8 +116,8 @@ class ContainerActionEvent(base.ZunPersistentObject, base.ZunObject):
         'id': fields.IntegerField(),
         'event': fields.StringField(nullable=True),
         'action_id': fields.IntegerField(nullable=True),
-        'start_time': fields.DateTimeField(nullable=True),
-        'finish_time': fields.DateTimeField(nullable=True),
+        'start_time': fields.DateTimeField(tzinfo_aware=False, nullable=True),
+        'finish_time': fields.DateTimeField(tzinfo_aware=False, nullable=True),
         'result': fields.StringField(nullable=True),
         'traceback': fields.StringField(nullable=True),
     }

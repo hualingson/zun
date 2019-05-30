@@ -12,23 +12,31 @@
 # limitations under the License.
 
 import datetime
+import errno
 import eventlet
 import functools
-import six
+import types
 
 from docker import errors
+from neutronclient.common import exceptions as n_exc
 from oslo_log import log as logging
 from oslo_utils import timeutils
+from oslo_utils import uuidutils
+import psutil
+import six
+import tenacity
 
 from zun.common import consts
 from zun.common import exception
 from zun.common.i18n import _
 from zun.common import utils
 from zun.common.utils import check_container_id
+from zun.compute import container_actions
 import zun.conf
 from zun.container.docker import host
 from zun.container.docker import utils as docker_utils
 from zun.container import driver
+from zun.image import driver as img_driver
 from zun.network import network as zun_network
 from zun import objects
 from zun.volume import driver as vol_driver
@@ -41,6 +49,17 @@ ATTACH_FLAG = "/attach/ws?logs=0&stream=1&stdin=1&stdout=1&stderr=1"
 
 def is_not_found(e):
     return '404' in str(e)
+
+
+def is_not_connected(e):
+    # Test the following exception:
+    #
+    #   500 Server Error: Internal Server Error ("container XXX is not
+    #   connected to the network XXX")
+    #
+    # Note(hongbin): Docker should response a 4xx instead of 500. This looks
+    # like a bug from docker side: https://github.com/moby/moby/issues/35888
+    return ' is not connected to the network ' in str(e)
 
 
 def is_conflict(e):
@@ -88,14 +107,27 @@ def wrap_docker_error(function):
 
 class DockerDriver(driver.ContainerDriver):
     """Implementation of container drivers for Docker."""
-    capabilities = {
-        "support_sandbox": True,
-        "support_standalone": True,
-    }
 
     def __init__(self):
         super(DockerDriver, self).__init__()
         self._host = host.Host()
+        self._get_host_storage_info()
+        self.image_drivers = {}
+        for driver_name in CONF.image_driver_list:
+            driver = img_driver.load_image_driver(driver_name)
+            self.image_drivers[driver_name] = driver
+        self.volume_drivers = {}
+        for driver_name in CONF.volume.driver_list:
+            driver = vol_driver.driver(driver_name)
+            self.volume_drivers[driver_name] = driver
+
+    def _get_host_storage_info(self):
+        host_info = self.get_host_info()
+        self.docker_root_dir = host_info['docker_root_dir']
+        storage_info = self._host.get_storage_info()
+        self.base_device_size = storage_info['default_base_size']
+        self.support_disk_quota = self._host.check_supported_disk_quota(
+            host_info)
 
     def load_image(self, image_path=None):
         with docker_utils.docker_client() as docker:
@@ -114,14 +146,98 @@ class DockerDriver(driver.ContainerDriver):
         with docker_utils.docker_client() as docker:
             return docker.get_image(name)
 
-    def delete_image(self, image):
-        with docker_utils.docker_client() as docker:
-            LOG.debug('Deleting image %s', image)
-            return docker.remove_image(image)
+    def delete_image(self, context, img_id, image_driver=None):
+        image = self.inspect_image(img_id)['RepoTags'][0]
+        if image_driver:
+            image_driver_list = [image_driver.lower()]
+        else:
+            image_driver_list = CONF.image_driver_list
+        for driver_name in image_driver_list:
+            try:
+                image_driver = img_driver.load_image_driver(driver_name)
+                if driver_name == 'glance':
+                    image_driver.delete_image_tar(context, image)
+                elif driver_name == 'docker':
+                    image_driver.delete_image(context, img_id)
+            except exception.ZunException:
+                LOG.exception('Unknown exception occurred while deleting '
+                              'image %s', img_id)
+
+    def delete_committed_image(self, context, img_id, image_driver):
+        try:
+            image_driver.delete_committed_image(context, img_id)
+        except Exception as e:
+            LOG.exception('Unknown exception occurred while '
+                          'deleting image %s: %s',
+                          img_id,
+                          six.text_type(e))
+            raise exception.ZunException(six.text_type(e))
 
     def images(self, repo, quiet=False):
         with docker_utils.docker_client() as docker:
             return docker.images(repo, quiet)
+
+    def pull_image(self, context, repo, tag, image_pull_policy='always',
+                   driver_name=None, registry=None):
+        if driver_name is None:
+            driver_name = CONF.default_image_driver
+
+        try:
+            image_driver = self.image_drivers[driver_name]
+            image, image_loaded = image_driver.pull_image(
+                context, repo, tag, image_pull_policy, registry)
+            if image:
+                image['driver'] = driver_name.split('.')[0]
+        except exception.ZunException:
+            raise
+        except Exception as e:
+            LOG.exception('Unknown exception occurred while loading '
+                          'image: %s', six.text_type(e))
+            raise exception.ZunException(six.text_type(e))
+
+        return image, image_loaded
+
+    def search_image(self, context, repo, tag, driver_name, exact_match):
+        if driver_name is None:
+            driver_name = CONF.default_image_driver
+
+        try:
+            image_driver = self.image_drivers[driver_name]
+            return image_driver.search_image(context, repo, tag,
+                                             exact_match)
+        except exception.ZunException:
+            raise
+        except Exception as e:
+            LOG.exception('Unknown exception occurred while searching '
+                          'for image: %s', six.text_type(e))
+            raise exception.ZunException(six.text_type(e))
+
+    def create_image(self, context, image_name, image_driver):
+        try:
+            img = image_driver.create_image(context, image_name)
+        except Exception as e:
+            LOG.exception('Unknown exception occurred while creating '
+                          'image: %s', six.text_type(e))
+            raise exception.ZunException(six.text_type(e))
+        return img
+
+    def upload_image_data(self, context, image, image_tag, image_data,
+                          image_driver):
+        try:
+            image_driver.update_image(context,
+                                      image.id,
+                                      tag=image_tag)
+            # Image data has to match the image format.
+            # contain format defaults to 'docker';
+            # disk format defaults to 'qcow2'.
+            img = image_driver.upload_image_data(context,
+                                                 image.id,
+                                                 image_data)
+        except Exception as e:
+            LOG.exception('Unknown exception occurred while uploading '
+                          'image: %s', six.text_type(e))
+            raise exception.ZunException(six.text_type(e))
+        return img
 
     def read_tar_image(self, image):
         with docker_utils.docker_client() as docker:
@@ -133,15 +249,14 @@ class DockerDriver(driver.ContainerDriver):
 
     def create(self, context, container, image, requested_networks,
                requested_volumes):
-        sandbox_id = container.get_sandbox_id()
-
         with docker_utils.docker_client() as docker:
             network_api = zun_network.api(context=context, docker_api=docker)
             name = container.name
             LOG.debug('Creating container with image %(image)s name %(name)s',
                       {'image': image['image'], 'name': name})
             self._provision_network(context, network_api, requested_networks)
-            binds = self._get_binds(context, requested_volumes)
+            volmaps = requested_volumes.get(container.uuid, [])
+            binds = self._get_binds(context, volmaps)
             kwargs = {
                 'name': self.get_container_name(container),
                 'command': container.command,
@@ -150,47 +265,62 @@ class DockerDriver(driver.ContainerDriver):
                 'labels': container.labels,
                 'tty': container.interactive,
                 'stdin_open': container.interactive,
+                'hostname': container.hostname,
             }
-            if not sandbox_id:
-                # Sandbox is not used so it is legitimate to customize
-                # the container's hostname
-                kwargs['hostname'] = container.hostname
 
-            runtime = container.runtime if container.runtime\
-                else CONF.container_runtime
+            if not self._is_runtime_supported():
+                if container.runtime:
+                    raise exception.ZunException(_(
+                        'Specifying runtime in Docker API is not supported'))
+                runtime = None
+            else:
+                runtime = container.runtime or CONF.container_runtime
 
             host_config = {}
+            host_config['privileged'] = container.privileged
             host_config['runtime'] = runtime
             host_config['binds'] = binds
             kwargs['volumes'] = [b['bind'] for b in binds.values()]
-            if sandbox_id:
-                host_config['network_mode'] = 'container:%s' % sandbox_id
-                # TODO(hongbin): Uncomment this after docker-py add support for
-                # container mode for pid namespace.
-                # host_config['pid_mode'] = 'container:%s' % sandbox_id
-                host_config['ipc_mode'] = 'container:%s' % sandbox_id
-            else:
-                self._process_networking_config(
-                    context, container, requested_networks, host_config,
-                    kwargs, docker)
+            self._process_exposed_ports(network_api.neutron_api, container)
+            self._process_networking_config(
+                context, container, requested_networks, host_config,
+                kwargs, docker)
             if container.auto_remove:
                 host_config['auto_remove'] = container.auto_remove
-            if container.memory is not None:
-                host_config['mem_limit'] = container.memory
-            if container.cpu is not None:
-                host_config['cpu_quota'] = int(100000 * container.cpu)
-                host_config['cpu_period'] = 100000
-            if container.restart_policy is not None:
+            if self._should_limit_memory(container):
+                host_config['mem_limit'] = str(container.memory) + 'M'
+            if self._should_limit_cpu(container):
+                host_config['cpu_shares'] = int(1024 * container.cpu)
+            if container.restart_policy:
                 count = int(container.restart_policy['MaximumRetryCount'])
                 name = container.restart_policy['Name']
                 host_config['restart_policy'] = {'Name': name,
                                                  'MaximumRetryCount': count}
+
             if container.disk:
                 disk_size = str(container.disk) + 'G'
                 host_config['storage_opt'] = {'size': disk_size}
+            if container.cpu_policy == 'dedicated':
+                host_config['cpuset_cpus'] = container.cpuset.cpuset_cpus
+                host_config['cpuset_mems'] = str(container.cpuset.cpuset_mems)
+            # The time unit in docker of heath checking is us, and the unit
+            # of interval and timeout is seconds.
+            if container.healthcheck:
+                healthcheck = {}
+                healthcheck['test'] = container.healthcheck.get('test', '')
+                interval = container.healthcheck.get('interval', 0)
+                healthcheck['interval'] = interval * 10 ** 9
+                healthcheck['retries'] = int(container.healthcheck.
+                                             get('retries', 0))
+                timeout = container.healthcheck.get('timeout', 0)
+                healthcheck['timeout'] = timeout * 10 ** 9
+                kwargs['healthcheck'] = healthcheck
 
             kwargs['host_config'] = docker.create_host_config(**host_config)
-            image_repo = image['repo'] + ":" + image['tag']
+            if image['tag']:
+                image_repo = image['repo'] + ":" + image['tag']
+            else:
+                image_repo = image['repo']
             response = docker.create_container(image_repo, **kwargs)
             container.container_id = response['Id']
 
@@ -202,6 +332,33 @@ class DockerDriver(driver.ContainerDriver):
             self._populate_container(container, response)
             container.save(context)
             return container
+
+    def _should_limit_memory(self, container):
+        return (container.memory is not None and
+                not isinstance(container, objects.Capsule))
+
+    def _should_limit_cpu(self, container):
+        return (container.cpu is not None and
+                not isinstance(container, objects.Capsule))
+
+    def _is_runtime_supported(self):
+        return float(CONF.docker.docker_remote_api_version) >= 1.26
+
+    def node_support_disk_quota(self):
+        return self.support_disk_quota
+
+    def get_host_default_base_size(self):
+        return self.base_device_size
+
+    def _process_exposed_ports(self, neutron_api, container):
+        if not container.exposed_ports:
+            return
+
+        secgroup_name = self._get_secgorup_name(container.uuid)
+        secgroup_id = neutron_api.create_security_group({'security_group': {
+            "name": secgroup_name}})['security_group']['id']
+        neutron_api.expose_ports(secgroup_id, container.exposed_ports)
+        container.security_groups = [secgroup_id]
 
     def _process_networking_config(self, context, container,
                                    requested_networks, host_config,
@@ -215,7 +372,8 @@ class DockerDriver(driver.ContainerDriver):
         security_group_ids = utils.get_security_group_ids(
             context, container.security_groups)
         addresses, port = network_api.create_or_update_port(
-            container, docker_net_name, requested_network, security_group_ids)
+            container, docker_net_name, requested_network, security_group_ids,
+            set_binding_host=True)
         container.addresses = {requested_network['network']: addresses}
 
         ipv4_address = None
@@ -240,12 +398,14 @@ class DockerDriver(driver.ContainerDriver):
             self._get_or_create_docker_network(
                 context, network_api, rq_network['network'])
 
+    def _get_secgorup_name(self, container_uuid):
+        return consts.NAME_PREFIX + container_uuid
+
     def _get_binds(self, context, requested_volumes):
         binds = {}
         for volume in requested_volumes:
-            volume_driver = vol_driver.driver(provider=volume.volume_provider,
-                                              context=context)
-            source, destination = volume_driver.bind_mount(volume)
+            volume_driver = self._get_volume_driver(volume)
+            source, destination = volume_driver.bind_mount(context, volume)
             binds[source] = {'bind': destination}
         return binds
 
@@ -271,24 +431,22 @@ class DockerDriver(driver.ContainerDriver):
         return addresses
 
     def delete(self, context, container, force):
-        teardown_network = True
-        if container.get_sandbox_id():
-            teardown_network = False
-
         with docker_utils.docker_client() as docker:
-            if teardown_network:
+            try:
                 network_api = zun_network.api(context=context,
                                               docker_api=docker)
                 self._cleanup_network_for_container(container, network_api)
-
-            if container.container_id:
-                try:
+                self._cleanup_exposed_ports(network_api.neutron_api,
+                                            container)
+                if container.container_id:
                     docker.remove_container(container.container_id,
                                             force=force)
-                except errors.APIError as api_error:
-                    if is_not_found(api_error):
-                        return
-                    raise
+            except errors.APIError as api_error:
+                if is_not_found(api_error):
+                    return
+                if is_not_connected(api_error):
+                    return
+                raise
 
     @wrap_docker_error
     def _cleanup_network_for_container(self, container, network_api):
@@ -299,55 +457,108 @@ class DockerDriver(driver.ContainerDriver):
             network_api.disconnect_container_from_network(
                 container, docker_net, neutron_network_id=neutron_net)
 
-    def list(self, context):
-        id_to_container_map = {}
-        with docker_utils.docker_client() as docker:
-            id_to_container_map = {c['Id']: c
-                                   for c in docker.list_containers()}
+    def _cleanup_exposed_ports(self, neutron_api, container):
+        if not container.exposed_ports:
+            return
 
-        db_containers = objects.Container.list_by_host(context, CONF.host)
-        for db_container in db_containers:
-            if db_container.status in (consts.CREATING, consts.DELETING,
-                                       consts.DELETED):
+        try:
+            neutron_api.delete_security_group(container.security_groups[0])
+        except n_exc.NeutronClientException:
+            LOG.exception("Failed to delete security group")
+
+    def check_container_exist(self, container):
+        with docker_utils.docker_client() as docker:
+            docker_containers = [c['Id']
+                                 for c in docker.list_containers()]
+            if container.container_id not in docker_containers:
+                return False
+        return True
+
+    def list(self, context):
+        non_existent_containers = []
+        with docker_utils.docker_client() as docker:
+            docker_containers = docker.list_containers()
+            id_to_container_map = {c['Id']: c
+                                   for c in docker_containers}
+            uuids = self._get_container_uuids(docker_containers)
+
+        local_containers = self._get_local_containers(context, uuids)
+        for container in local_containers:
+            if container.status in (consts.CREATING, consts.DELETING,
+                                    consts.DELETED):
                 # Skip populating db record since the container is in a
                 # unstable state.
                 continue
 
-            container_id = db_container.container_id
+            container_id = container.container_id
             docker_container = id_to_container_map.get(container_id)
             if not container_id or not docker_container:
-                if db_container.auto_remove:
-                    db_container.status = consts.DELETED
-                    db_container.save(context)
-                else:
-                    LOG.warning("Container %s was recorded in DB but missing "
-                                "in docker", db_container.uuid)
+                non_existent_containers.append(container)
                 continue
 
-            self._populate_container(db_container, docker_container)
+            self._populate_container(container, docker_container)
 
-        return db_containers
+        return local_containers, non_existent_containers
 
-    def update_containers_states(self, context, containers):
-        db_containers = self.list(context)
-        if not db_containers:
+    def heal_with_rebuilding_container(self, context, container, manager):
+        if not container.container_id:
             return
 
-        id_to_db_container_map = {container.container_id: container
-                                  for container in db_containers
-                                  if container.container_id}
+        rebuild_status = utils.VALID_STATES['rebuild']
+        try:
+            if (container.auto_heal and
+                    container.status in rebuild_status):
+                context.project_id = container.project_id
+                objects.ContainerAction.action_start(
+                    context, container.uuid, container_actions.REBUILD,
+                    want_result=False)
+                manager.container_rebuild(context, container)
+            else:
+                LOG.warning("Container %s was recorded in DB but "
+                            "missing in docker", container.uuid)
+                container.status = consts.ERROR
+                msg = "No such container: %s in docker" % \
+                      (container.container_id)
+                container.status_reason = six.text_type(msg)
+                container.save(context)
+        except Exception as e:
+            LOG.warning("heal container with rebuilding failed, "
+                        "err code: %s", e)
+
+    def _get_container_uuids(self, containers):
+        # The name of Docker container is of the form '/zun-<uuid>'
+        name_prefix = '/' + consts.NAME_PREFIX
+        uuids = [c['Names'][0].replace(name_prefix, '', 1)
+                 for c in containers]
+        return [u for u in uuids if uuidutils.is_uuid_like(u)]
+
+    def _get_local_containers(self, context, uuids):
+        host_containers = objects.Container.list_by_host(context, CONF.host)
+        uuids = list(set(uuids) | set([c.uuid for c in host_containers]))
+        containers = objects.Container.list(context,
+                                            filters={'uuid': uuids})
+        return containers
+
+    def update_containers_states(self, context, containers, manager):
+        local_containers, non_existent_containers = self.list(context)
+        if not local_containers:
+            return
+
+        id_to_local_container_map = {container.container_id: container
+                                     for container in local_containers
+                                     if container.container_id}
         id_to_container_map = {container.container_id: container
                                for container in containers
                                if container.container_id}
 
         for cid in (six.viewkeys(id_to_container_map) &
-                    six.viewkeys(id_to_db_container_map)):
+                    six.viewkeys(id_to_local_container_map)):
             container = id_to_container_map[cid]
             # sync status
-            db_container = id_to_db_container_map[cid]
-            if container.status != db_container.status:
+            local_container = id_to_local_container_map[cid]
+            if container.status != local_container.status:
                 old_status = container.status
-                container.status = db_container.status
+                container.status = local_container.status
                 container.save(context)
                 LOG.info('Status of container %s changed from %s to %s',
                          container.uuid, old_status, container.status)
@@ -360,6 +571,14 @@ class DockerDriver(driver.ContainerDriver):
                 container.save(context)
                 LOG.info('Host of container %s changed from %s to %s',
                          container.uuid, old_host, container.host)
+        for container in non_existent_containers:
+            if container.host == CONF.host:
+                if container.auto_remove:
+                    container.status = consts.DELETED
+                    container.save(context)
+                else:
+                    self.heal_with_rebuilding_container(context, container,
+                                                        manager)
 
     def show(self, context, container):
         with docker_utils.docker_client() as docker:
@@ -421,13 +640,25 @@ class DockerDriver(driver.ContainerDriver):
             container.runtime = hostconfig.get('Runtime')
 
     def _populate_container_state(self, container, state):
+        if container.task_state:
+            # NOTE(hongbin): we don't want to populate container state
+            # if another thread is doing task on this container.
+            return
+
         if not state:
+            LOG.warning('Receive unexpected state from docker: %s', state)
             container.status = consts.UNKNOWN
+            container.status_reason = _("container state is missing")
             container.status_detail = None
         elif type(state) is dict:
             status_detail = ''
             if state.get('Error'):
-                container.status = consts.ERROR
+                if state.get('Status') in ('exited', 'removing'):
+                    container.status = consts.STOPPED
+                else:
+                    status = state.get('Status').capitalize()
+                    if status in consts.CONTAINER_STATUSES:
+                        container.status = status
                 status_detail = self.format_status_detail(
                     state.get('FinishedAt'))
                 container.status_detail = "Exited({}) {} ago " \
@@ -438,12 +669,18 @@ class DockerDriver(driver.ContainerDriver):
                     state.get('StartedAt'))
                 container.status_detail = "Up {} (paused)".format(
                     status_detail)
+            elif state.get('Restarting'):
+                container.status = consts.RESTARTING
+                container.status_detail = "Restarting"
             elif state.get('Running'):
                 container.status = consts.RUNNING
                 status_detail = self.format_status_detail(
                     state.get('StartedAt'))
                 container.status_detail = "Up {}".format(
                     status_detail)
+            elif state.get('Dead'):
+                container.status = consts.DEAD
+                container.status_detail = "Dead"
             else:
                 started_at = self.format_status_detail(state.get('StartedAt'))
                 finished_at = self.format_status_detail(
@@ -452,10 +689,14 @@ class DockerDriver(driver.ContainerDriver):
                     container.status = consts.CREATED
                     container.status_detail = "Created"
                 elif (started_at == "" and
-                        container.status in (consts.CREATED, consts.ERROR)):
+                        container.status in (consts.CREATED, consts.RESTARTING,
+                                             consts.ERROR, consts.REBUILDING)):
                     pass
                 elif started_at != "" and finished_at == "":
+                    LOG.warning('Receive unexpected state from docker: %s',
+                                state)
                     container.status = consts.UNKNOWN
+                    container.status_reason = _("unexpected container state")
                     container.status_detail = ""
                 elif started_at != "" and finished_at != "":
                     container.status = consts.STOPPED
@@ -468,26 +709,28 @@ class DockerDriver(driver.ContainerDriver):
             if state == 'created' and container.status == consts.CREATING:
                 container.status = consts.CREATED
             elif (state == 'created' and
-                    container.status in (consts.CREATED, consts.ERROR)):
+                    container.status in (consts.CREATED, consts.RESTARTING,
+                                         consts.ERROR, consts.REBUILDING)):
                 pass
-            elif state == 'ERROR':
+            elif state == 'paused':
                 container.status = consts.PAUSED
             elif state == 'running':
                 container.status = consts.RUNNING
             elif state == 'dead':
-                container.status = consts.ERROR
-            elif state in ('restarting', 'exited', 'removing'):
+                container.status = consts.DEAD
+            elif state == 'restarting':
+                container.status = consts.RESTARTING
+            elif state in ('exited', 'removing'):
                 container.status = consts.STOPPED
             else:
+                LOG.warning('Receive unexpected state from docker: %s', state)
                 container.status = consts.UNKNOWN
+                container.status_reason = _("unexpected container state")
             container.status_detail = None
 
     def _populate_command(self, container, config):
         command_list = config.get('Cmd')
-        command_str = None
-        if command_list:
-            command_str = ' '.join(command_list)
-        container.command = command_str
+        container.command = command_list
 
     def _populate_hostname_and_ports(self, container, config):
         # populate hostname only when container.hostname wasn't set
@@ -600,10 +843,7 @@ class DockerDriver(driver.ContainerDriver):
                 raise exception.Conflict(_(
                     "Timeout on executing command: %s") % command)
             inspect_res = docker.exec_inspect(exec_id)
-            return {"output": output,
-                    "exit_code": inspect_res['ExitCode'],
-                    "exec_id": None,
-                    "url": None}
+            return output, inspect_res['ExitCode']
 
     def execute_resize(self, exec_id, height, width):
         height = int(height)
@@ -637,11 +877,11 @@ class DockerDriver(driver.ContainerDriver):
         args = {}
         memory = patch.get('memory')
         if memory is not None:
-            args['mem_limit'] = memory
+            args['mem_limit'] = str(memory) + 'M'
+            args['memswap_limit'] = CONF.default_memory_swap
         cpu = patch.get('cpu')
         if cpu is not None:
-            args['cpu_quota'] = int(100000 * cpu)
-            args['cpu_period'] = 100000
+            args['cpu_shares'] = int(1024 * cpu)
 
         with docker_utils.docker_client() as docker:
             return docker.update_container(container.container_id, **args)
@@ -681,7 +921,10 @@ class DockerDriver(driver.ContainerDriver):
             try:
                 stream, stat = docker.get_archive(
                     container.container_id, path)
-                filedata = stream.read()
+                if isinstance(stream, types.GeneratorType):
+                    filedata = six.b("").join(stream)
+                else:
+                    filedata = stream.read()
                 return filedata, stat
             except errors.APIError as api_error:
                 if is_not_found(api_error):
@@ -754,62 +997,34 @@ class DockerDriver(driver.ContainerDriver):
             value = six.text_type(value)
         return value.encode('utf-8')
 
-    def create_sandbox(self, context, container, requested_networks,
-                       requested_volumes,
-                       image='kubernetes/pause'):
-        with docker_utils.docker_client() as docker:
-            network_api = zun_network.api(context=context, docker_api=docker)
-            self._provision_network(context, network_api, requested_networks)
-            binds = self._get_binds(context, requested_volumes)
-            host_config = {'binds': binds}
-            name = self.get_sandbox_name(container)
-            volumes = [b['bind'] for b in binds.values()]
-            kwargs = {
-                'name': name,
-                'hostname': name[:63],
-                'volumes': volumes,
-            }
-            self._process_networking_config(
-                context, container, requested_networks, host_config,
-                kwargs, docker)
-            kwargs['host_config'] = docker.create_host_config(**host_config)
-            sandbox = docker.create_container(image, **kwargs)
-            container.set_sandbox_id(sandbox['Id'])
-            addresses = self._setup_network_for_container(
-                context, container, requested_networks, network_api)
-            if addresses is None:
-                raise exception.ZunException(_(
-                    "Unexpected missing of addresses"))
+    def _get_volume_driver(self, volume_mapping):
+        driver_name = volume_mapping.volume_provider
+        driver = self.volume_drivers.get(driver_name)
+        if not driver:
+            msg = _("The volume provider '%s' is not supported") % driver_name
+            raise exception.ZunException(msg)
 
-            container.addresses = addresses
-            container.save(context)
-
-            docker.start(sandbox['Id'])
-            return sandbox['Id']
+        return driver
 
     def attach_volume(self, context, volume_mapping):
-        volume_driver = vol_driver.driver(
-            provider=volume_mapping.volume_provider,
-            context=context)
-        volume_driver.attach(volume_mapping)
+        volume_driver = self._get_volume_driver(volume_mapping)
+        volume_driver.attach(context, volume_mapping)
 
     def detach_volume(self, context, volume_mapping):
-        volume_driver = vol_driver.driver(
-            provider=volume_mapping.volume_provider,
-            context=context)
-        volume_driver.detach(volume_mapping)
+        volume_driver = self._get_volume_driver(volume_mapping)
+        volume_driver.detach(context, volume_mapping)
 
     def delete_volume(self, context, volume_mapping):
-        volume_driver = vol_driver.driver(
-            provider=volume_mapping.volume_provider,
-            context=context)
-        volume_driver.delete(volume_mapping)
+        volume_driver = self._get_volume_driver(volume_mapping)
+        volume_driver.delete(context, volume_mapping)
 
     def is_volume_available(self, context, volume_mapping):
-        volume_driver = vol_driver.driver(
-            provider=volume_mapping.volume_provider,
-            context=context)
-        return volume_driver.is_volume_available(volume_mapping)
+        volume_driver = self._get_volume_driver(volume_mapping)
+        return volume_driver.is_volume_available(context, volume_mapping)
+
+    def is_volume_deleted(self, context, volume_mapping):
+        volume_driver = self._get_volume_driver(volume_mapping)
+        return volume_driver.is_volume_deleted(context, volume_mapping)
 
     def _get_or_create_docker_network(self, context, network_api,
                                       neutron_net_id):
@@ -826,27 +1041,8 @@ class DockerDriver(driver.ContainerDriver):
         # so it will not be duplicated across projects.
         return neutron_net_id
 
-    def delete_sandbox(self, context, container):
-        sandbox_id = container.get_sandbox_id()
-        with docker_utils.docker_client() as docker:
-            network_api = zun_network.api(context=context, docker_api=docker)
-            self._cleanup_network_for_container(container, network_api)
-            try:
-                docker.remove_container(sandbox_id, force=True)
-            except errors.APIError as api_error:
-                if is_not_found(api_error):
-                    return
-                raise
-
-    def stop_sandbox(self, context, sandbox_id):
-        with docker_utils.docker_client() as docker:
-            docker.stop(sandbox_id)
-
-    def get_sandbox_name(self, container):
-        return 'zun-sandbox-' + container.uuid
-
     def get_container_name(self, container):
-        return 'zun-' + container.uuid
+        return consts.NAME_PREFIX + container.uuid
 
     def get_host_info(self):
         with docker_utils.docker_client() as docker:
@@ -867,27 +1063,40 @@ class DockerDriver(driver.ContainerDriver):
                     kv = l.split("=")
                     label = {kv[0]: kv[1]}
                     labels.update(label)
-            return (total, running, paused, stopped, cpus,
-                    architecture, os_type, os, kernel_version, labels)
+            runtimes = []
+            if 'Runtimes' in info:
+                for key in info['Runtimes']:
+                    runtimes.append(key)
+            else:
+                runtimes = ['runc']
+            docker_root_dir = info['DockerRootDir']
+            enable_cpu_pinning = CONF.compute.enable_cpu_pinning
 
-    def get_cpu_used(self):
-        cpu_used = 0
-        with docker_utils.docker_client() as docker:
-            containers = docker.containers()
-            for container in containers:
-                cnt_id = container['Id']
-                # Fixme: if there is a way to get all container inspect info
-                # for one call only?
-                inspect = docker.inspect_container(cnt_id)
-                cpu_period = inspect['HostConfig']['CpuPeriod']
-                cpu_quota = inspect['HostConfig']['CpuQuota']
-                if cpu_period and cpu_quota:
-                    cpu_used += float(cpu_quota) / cpu_period
-                else:
-                    if 'NanoCpus' in inspect['HostConfig']:
-                        nanocpus = inspect['HostConfig']['NanoCpus']
-                        cpu_used += float(nanocpus) / 1e9
-            return cpu_used
+            return {'total_containers': total,
+                    'running_containers': running,
+                    'paused_containers': paused,
+                    'stopped_containers': stopped,
+                    'cpus': cpus,
+                    'architecture': architecture,
+                    'os_type': os_type,
+                    'os': os,
+                    'kernel_version': kernel_version,
+                    'labels': labels,
+                    'runtimes': runtimes,
+                    'docker_root_dir': docker_root_dir,
+                    'enable_cpu_pinning': enable_cpu_pinning}
+
+    def get_total_disk_for_container(self):
+        try:
+            disk_usage = psutil.disk_usage(self.docker_root_dir)
+        except OSError as e:
+            if e.errno != errno.ENOENT:
+                raise
+            LOG.warning('Docker data root doesnot exist.')
+            # give another try with system root
+            disk_usage = psutil.disk_usage('/')
+        total_disk = disk_usage.total / 1024 ** 3
+        return int(total_disk * (1 - CONF.compute.reserve_disk_for_image))
 
     def add_security_group(self, context, container, security_group):
 
@@ -926,7 +1135,7 @@ class DockerDriver(driver.ContainerDriver):
             container.addresses = update
             container.save(context)
 
-    def network_attach(self, context, container, network):
+    def network_attach(self, context, container, requested_network):
         with docker_utils.docker_client() as docker:
             security_group_ids = None
             if container.security_groups:
@@ -934,18 +1143,14 @@ class DockerDriver(driver.ContainerDriver):
                     context, container.security_groups)
             network_api = zun_network.api(context,
                                           docker_api=docker)
+            network = requested_network['network']
             if network in container.addresses:
-                raise exception.ZunException('Container %(container)s has'
-                                             ' alreay connected to the network'
-                                             '%(network)s.'
-                                             % {'container': container['uuid'],
+                raise exception.ZunException('Container %(container)s has '
+                                             'already connected to the '
+                                             'network %(network)s.'
+                                             % {'container': container.uuid,
                                                 'network': network})
             self._get_or_create_docker_network(context, network_api, network)
-            requested_network = {'network': network,
-                                 'port': '',
-                                 'v4-fixed-ip': '',
-                                 'v6-fixed-ip': '',
-                                 'preserve_on_delete': False}
             docker_net_name = self._get_docker_network_name(context, network)
             addrs = network_api.connect_container_to_network(
                 container, docker_net_name, requested_network,
@@ -959,3 +1164,161 @@ class DockerDriver(driver.ContainerDriver):
             addresses.update(update)
             container.addresses = addresses
             container.save(context)
+
+    def create_network(self, context, neutron_net_id):
+        with docker_utils.docker_client() as docker:
+            network_api = zun_network.api(context,
+                                          docker_api=docker)
+            docker_net_name = self._get_docker_network_name(
+                context, neutron_net_id)
+            return network_api.create_network(
+                neutron_net_id=neutron_net_id,
+                name=docker_net_name)
+
+    def delete_network(self, context, network):
+        with docker_utils.docker_client() as docker:
+            network_api = zun_network.api(context,
+                                          docker_api=docker)
+            network_api.remove_network(network)
+
+    def create_capsule(self, context, capsule, image, requested_networks,
+                       requested_volumes):
+        capsule = self.create(context, capsule, image, requested_networks,
+                              requested_volumes)
+        self.start(context, capsule)
+        for container in capsule.init_containers:
+            self._create_container_in_capsule(context, capsule, container,
+                                              requested_networks,
+                                              requested_volumes)
+            self._wait_for_init_container(context, container)
+        for container in capsule.containers:
+            self._create_container_in_capsule(context, capsule, container,
+                                              requested_networks,
+                                              requested_volumes)
+        return capsule
+
+    def _create_container_in_capsule(self, context, capsule, container,
+                                     requested_networks, requested_volumes):
+        # pull image
+        image_driver_name = container.image_driver
+        repo, tag = utils.parse_image_name(container.image, image_driver_name)
+        image_pull_policy = utils.get_image_pull_policy(
+            container.image_pull_policy, tag)
+        image, image_loaded = self.pull_image(
+            context, repo, tag, image_pull_policy, image_driver_name)
+        image['repo'], image['tag'] = repo, tag
+        if not image_loaded:
+            self.load_image(image['path'])
+        if image_driver_name == 'glance':
+            self.read_tar_image(image)
+        if image['tag'] != tag:
+            LOG.warning("The input tag is different from the tag in tar")
+
+        # create container
+        with docker_utils.docker_client() as docker:
+            name = container.name
+            LOG.debug('Creating container with image %(image)s name %(name)s',
+                      {'image': image['image'], 'name': name})
+            volmaps = requested_volumes.get(container.uuid, [])
+            binds = self._get_binds(context, volmaps)
+            kwargs = {
+                'name': self.get_container_name(container),
+                'command': container.command,
+                'environment': container.environment,
+                'working_dir': container.workdir,
+                'labels': container.labels,
+                'tty': container.interactive,
+                'stdin_open': container.interactive,
+            }
+
+            host_config = {}
+            host_config['privileged'] = container.privileged
+            host_config['binds'] = binds
+            kwargs['volumes'] = [b['bind'] for b in binds.values()]
+            host_config['network_mode'] = 'container:%s' % capsule.container_id
+            # TODO(hongbin): Uncomment this after docker-py add support for
+            # container mode for pid namespace.
+            # host_config['pid_mode'] = 'container:%s' % capsule.container_id
+            host_config['ipc_mode'] = 'container:%s' % capsule.container_id
+            if container.auto_remove:
+                host_config['auto_remove'] = container.auto_remove
+            if container.memory is not None:
+                host_config['mem_limit'] = str(container.memory) + 'M'
+            if container.cpu is not None:
+                host_config['cpu_shares'] = int(1024 * container.cpu)
+            if container.restart_policy:
+                count = int(container.restart_policy['MaximumRetryCount'])
+                name = container.restart_policy['Name']
+                host_config['restart_policy'] = {'Name': name,
+                                                 'MaximumRetryCount': count}
+
+            if container.disk:
+                disk_size = str(container.disk) + 'G'
+                host_config['storage_opt'] = {'size': disk_size}
+            # The time unit in docker of heath checking is us, and the unit
+            # of interval and timeout is seconds.
+            if container.healthcheck:
+                healthcheck = {}
+                healthcheck['test'] = container.healthcheck.get('test', '')
+                interval = container.healthcheck.get('interval', 0)
+                healthcheck['interval'] = interval * 10 ** 9
+                healthcheck['retries'] = int(container.healthcheck.
+                                             get('retries', 0))
+                timeout = container.healthcheck.get('timeout', 0)
+                healthcheck['timeout'] = timeout * 10 ** 9
+                kwargs['healthcheck'] = healthcheck
+
+            kwargs['host_config'] = docker.create_host_config(**host_config)
+            if image['tag']:
+                image_repo = image['repo'] + ":" + image['tag']
+            else:
+                image_repo = image['repo']
+            response = docker.create_container(image_repo, **kwargs)
+            container.container_id = response['Id']
+            docker.start(container.container_id)
+
+            response = docker.inspect_container(container.container_id)
+            self._populate_container(container, response)
+            container.save(context)
+
+    def _wait_for_init_container(self, context, container, timeout=3600):
+        def retry_if_result_is_false(result):
+            return result is False
+
+        def check_init_container_stopped():
+            status = self.show(context, container).status
+            if status == consts.STOPPED:
+                return True
+            elif status == consts.RUNNING:
+                return False
+            else:
+                raise exception.ZunException(
+                    _("Container has unexpected status: %s") % status)
+
+        r = tenacity.Retrying(
+            stop=tenacity.stop_after_delay(timeout),
+            wait=tenacity.wait_exponential(),
+            retry=tenacity.retry_if_result(retry_if_result_is_false))
+        r.call(check_init_container_stopped)
+
+    def delete_capsule(self, context, capsule, force):
+        for container in capsule.containers:
+            self._delete_container_in_capsule(context, capsule, container,
+                                              force)
+        self.delete(context, capsule, force)
+
+    def _delete_container_in_capsule(self, context, capsule, container, force):
+        if not container.container_id:
+            return
+
+        with docker_utils.docker_client() as docker:
+            try:
+                docker.stop(container.container_id)
+                docker.remove_container(container.container_id,
+                                        force=force)
+            except errors.APIError as api_error:
+                if is_not_found(api_error):
+                    return
+                if is_not_connected(api_error):
+                    return
+                raise

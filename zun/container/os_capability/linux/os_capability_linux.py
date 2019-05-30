@@ -14,6 +14,7 @@
 #    under the License.
 
 from collections import defaultdict
+import errno
 import re
 
 from oslo_log import log as logging
@@ -52,3 +53,19 @@ class LinuxHost(host_capability.Host):
             elif len(val) == 2 and old_lscpu:
                 sock_map[val[0]].append(int(val[1]))
         return sock_map
+
+    def get_mem_numa_info(self):
+        try:
+            output = utils.execute('numactl', '-H')
+        except OSError as e:
+            if e.errno == errno.ENOENT:
+                LOG.info("The program 'numactl' is not installed.")
+                return []
+            else:
+                raise
+
+        sizes = re.findall("size\: \d*", str(output))
+        mem_numa = []
+        for size in sizes:
+            mem_numa.append(int(size.split(' ')[1]))
+        return mem_numa

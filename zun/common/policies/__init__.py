@@ -12,12 +12,17 @@
 
 import itertools
 
+from zun.common.policies import availability_zone
 from zun.common.policies import base
 from zun.common.policies import capsule
 from zun.common.policies import container
+from zun.common.policies import container_action
 from zun.common.policies import host
 from zun.common.policies import image
 from zun.common.policies import network
+from zun.common.policies import quota
+from zun.common.policies import quota_class
+from zun.common.policies import registry
 from zun.common.policies import zun_service
 
 
@@ -29,5 +34,10 @@ def list_rules():
         zun_service.list_rules(),
         host.list_rules(),
         capsule.list_rules(),
-        network.list_rules()
+        network.list_rules(),
+        container_action.list_rules(),
+        availability_zone.list_rules(),
+        quota.list_rules(),
+        quota_class.list_rules(),
+        registry.list_rules(),
     )

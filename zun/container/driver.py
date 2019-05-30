@@ -76,7 +76,7 @@ class ContainerDriver(object):
         """List all containers."""
         raise NotImplementedError()
 
-    def update_containers_states(self, context, containers):
+    def update_containers_states(self, context, containers, manager):
         """Update containers states."""
         raise NotImplementedError()
 
@@ -149,26 +149,8 @@ class ContainerDriver(object):
         """Display stats of the container."""
         raise NotImplementedError()
 
-    def create_sandbox(self, context, *args, **kwargs):
-        """Create a sandbox."""
-        raise NotImplementedError()
-
-    def delete_sandbox(self, context, container, sandbox_id):
-        """Delete a sandbox."""
-        raise NotImplementedError()
-
-    # Note: This is not currently used, but
-    # may be used later
-    def stop_sandbox(self, context, sandbox_id):
-        """Stop a sandbox."""
-        raise NotImplementedError()
-
-    def get_sandbox_name(self, container):
-        """Retrieve sandbox name."""
-        raise NotImplementedError()
-
     def get_container_name(self, container):
-        """Retrieve sandbox name."""
+        """Retrieve container name."""
         raise NotImplementedError()
 
     def get_addresses(self, context, container):
@@ -192,8 +174,8 @@ class ContainerDriver(object):
     def get_host_info(self):
         raise NotImplementedError()
 
-    def get_cpu_used(self):
-        raise NotImplementedError()
+    def get_total_disk_for_container(self):
+        return NotImplementedError()
 
     def attach_volume(self, context, volume_mapping):
         raise NotImplementedError()
@@ -207,6 +189,9 @@ class ContainerDriver(object):
     def is_volume_available(self, context, volume_mapping):
         raise NotImplementedError()
 
+    def is_volume_deleted(self, context, volume_mapping):
+        raise NotImplementedError()
+
     def add_security_group(self, context, container, security_group, **kwargs):
         raise NotImplementedError()
 
@@ -217,30 +202,43 @@ class ContainerDriver(object):
     def get_available_nodes(self):
         pass
 
-    def get_available_resources(self, node):
+    def get_available_resources(self):
+        """Retrieve resource information.
+
+        This method is called when nova-compute launches, and
+        as part of a periodic task that records the results in the DB.
+
+        :returns: dictionary containing resource info
+        """
+        data = {}
+
         numa_topo_obj = self.get_host_numa_topology()
-        node.numa_topology = numa_topo_obj
+        data['numa_topology'] = numa_topo_obj
         meminfo = self.get_host_mem()
         (mem_total, mem_free, mem_ava, mem_used) = meminfo
-        node.mem_total = mem_total // units.Ki
-        node.mem_free = mem_free // units.Ki
-        node.mem_available = mem_ava // units.Ki
-        node.mem_used = mem_used // units.Ki
+        data['mem_total'] = mem_total // units.Ki
+        data['mem_free'] = mem_free // units.Ki
+        data['mem_available'] = mem_ava // units.Ki
+        data['mem_used'] = mem_used // units.Ki
         info = self.get_host_info()
-        (total, running, paused, stopped, cpus,
-         architecture, os_type, os, kernel_version, labels) = info
-        node.total_containers = total
-        node.running_containers = running
-        node.paused_containers = paused
-        node.stopped_containers = stopped
-        node.cpus = cpus
-        node.architecture = architecture
-        node.os_type = os_type
-        node.os = os
-        node.kernel_version = kernel_version
-        cpu_used = self.get_cpu_used()
-        node.cpu_used = cpu_used
-        node.labels = labels
+        data['total_containers'] = info['total_containers']
+        data['running_containers'] = info['running_containers']
+        data['paused_containers'] = info['paused_containers']
+        data['stopped_containers'] = info['stopped_containers']
+        data['cpus'] = info['cpus']
+        data['architecture'] = info['architecture']
+        data['os_type'] = info['os_type']
+        data['os'] = info['os']
+        data['kernel_version'] = info['kernel_version']
+        data['labels'] = info['labels']
+        disk_total = self.get_total_disk_for_container()
+        data['disk_total'] = disk_total
+        disk_quota_supported = self.node_support_disk_quota()
+        data['disk_quota_supported'] = disk_quota_supported
+        data['runtimes'] = info['runtimes']
+        data['enable_cpu_pinning'] = info['enable_cpu_pinning']
+
+        return data
 
     def node_is_available(self, nodename):
         """Return whether this compute service manages a particular node."""
@@ -251,5 +249,45 @@ class ContainerDriver(object):
     def network_detach(self, context, container, network):
         raise NotImplementedError()
 
-    def network_attach(self, context, container, network):
+    def network_attach(self, context, container, requested_network):
+        raise NotImplementedError()
+
+    def create_network(self, context, network):
+        raise NotImplementedError()
+
+    def delete_network(self, context, network):
+        raise NotImplementedError()
+
+    def inspect_network(self, network):
+        raise NotImplementedError()
+
+    def node_support_disk_quota(self):
+        raise NotImplementedError()
+
+    def get_host_default_base_size(self):
+        raise NotImplementedError()
+
+    def pull_image(self, context, repo, tag, **kwargs):
+        raise NotImplementedError()
+
+    def search_image(self, context, repo, tag, driver_name, exact_match):
+        raise NotImplementedError()
+
+    def create_image(self, context, image_name, image_driver):
+        raise NotImplementedError()
+
+    def upload_image_data(self, context, image, image_tag, image_data,
+                          image_driver):
+        raise NotImplementedError()
+
+    def delete_committed_image(self, context, img_id, image_driver):
+        raise NotImplementedError()
+
+    def delete_image(self, context, img_id, image_driver):
+        raise NotImplementedError()
+
+    def create_capsule(self, context, capsule, **kwargs):
+        raise NotImplementedError()
+
+    def delete_capsule(self, context, capsule, **kwargs):
         raise NotImplementedError()

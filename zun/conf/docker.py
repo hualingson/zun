@@ -53,6 +53,18 @@ docker_opts = [
                default=5,
                help='Timeout in seconds for executing a command in a docker '
                     'container.'),
+    cfg.StrOpt('docker_data_root',
+               default='/var/lib/docker',
+               deprecated_for_removal=True,
+               help='Root directory of persistent Docker state.'),
+    cfg.StrOpt('default_registry',
+               help='The default registry from which docker images are '
+                    'pulled. Its value can be the registry domain name '
+                    '(e.g. docker.io) or None.'),
+    cfg.StrOpt('default_registry_username',
+               help='The username of the default registry.'),
+    cfg.StrOpt('default_registry_password',
+               help='The password of the default registry.'),
 ]
 
 ALL_OPTS = (docker_opts)

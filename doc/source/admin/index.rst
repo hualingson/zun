@@ -13,3 +13,6 @@ the services.
 
   osprofiler
   clear-containers
+  keep-containers-alive
+  security-groups
+  private_registry

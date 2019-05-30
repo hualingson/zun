@@ -47,13 +47,13 @@ class API(rpc_service.API):
         * 1.1 - Add image endpoints.
     """
 
-    def __init__(self, transport=None, context=None, topic=None):
+    def __init__(self, context=None, topic=None):
         if topic is None:
             zun.conf.CONF.import_opt(
                 'topic', 'zun.conf.compute', group='compute')
 
         super(API, self).__init__(
-            transport, context, topic=zun.conf.CONF.compute.topic)
+            context, topic=zun.conf.CONF.compute.topic)
 
     def container_create(self, context, host, container, limits,
                          requested_networks, requested_volumes, run,
@@ -66,7 +66,7 @@ class API(rpc_service.API):
                    pci_requests=pci_requests)
 
     @check_container_host
-    def container_delete(self, context, container, force):
+    def container_delete(self, context, container, force=False):
         return self._cast(container.host, 'container_delete',
                           container=container, force=force)
 
@@ -74,6 +74,10 @@ class API(rpc_service.API):
     def container_show(self, context, container):
         return self._call(container.host, 'container_show',
                           container=container)
+
+    def container_rebuild(self, context, container, run):
+        self._cast(container.host, 'container_rebuild', container=container,
+                   run=run)
 
     def container_reboot(self, context, container, timeout):
         self._cast(container.host, 'container_reboot', container=container,
@@ -120,6 +124,10 @@ class API(rpc_service.API):
         return self._call(container.host, 'container_update',
                           container=container, patch=patch)
 
+    def resize_container(self, context, container, patch):
+        self._cast(container.host, 'resize_container',
+                   container=container, patch=patch)
+
     @check_container_host
     def container_attach(self, context, container):
         return self._call(container.host, 'container_attach',
@@ -136,14 +144,17 @@ class API(rpc_service.API):
                           container=container, ps_args=ps_args)
 
     @check_container_host
-    def container_get_archive(self, context, container, path):
+    def container_get_archive(self, context, container, path, encode_data):
         return self._call(container.host, 'container_get_archive',
-                          container=container, path=path)
+                          container=container, path=path,
+                          encode_data=encode_data)
 
     @check_container_host
-    def container_put_archive(self, context, container, path, data):
+    def container_put_archive(self, context, container, path, data,
+                              decode_data):
         return self._call(container.host, 'container_put_archive',
-                          container=container, path=path, data=data)
+                          container=container, path=path, data=data,
+                          decode_data=decode_data)
 
     @check_container_host
     def container_stats(self, context, container):
@@ -163,18 +174,18 @@ class API(rpc_service.API):
         return self._cast(container.host, 'remove_security_group',
                           container=container, security_group=security_group)
 
-    def image_pull(self, context, image):
-        # NOTE(hongbin): Image API doesn't support multiple compute nodes
-        # scenario yet, so we temporarily set host to None and rpc will
-        # choose an arbitrary host.
-        host = None
+    def image_delete(self, context, image, host):
+        self._cast(host, 'image_delete', image=image)
+
+    def image_pull(self, context, image, host):
         self._cast(host, 'image_pull', image=image)
 
     def image_search(self, context, image, image_driver, exact_match,
-                     host=None):
+                     registry, host=None):
         return self._call(host, 'image_search', image=image,
                           image_driver_name=image_driver,
-                          exact_match=exact_match)
+                          exact_match=exact_match,
+                          registry=registry)
 
     def capsule_create(self, context, host, capsule,
                        requested_networks, requested_volumes, limits):
@@ -189,9 +200,20 @@ class API(rpc_service.API):
                           capsule=capsule)
 
     def network_detach(self, context, container, network):
-        return self._call(container.host, 'network_detach',
-                          container=container, network=network)
+        self._cast(container.host, 'network_detach',
+                   container=container, network=network)
 
-    def network_attach(self, context, container, network):
-        return self._call(container.host, 'network_attach',
-                          container=container, network=network)
+    def network_attach(self, context, container, requested_network):
+        self._cast(container.host, 'network_attach',
+                   container=container,
+                   requested_network=requested_network)
+
+    def network_create(self, context, neutron_net_id):
+        host = None
+        return self._call(host, 'network_create',
+                          neutron_net_id=neutron_net_id)
+
+    def network_delete(self, context, network):
+        host = None
+        return self._call(host, 'network_delete',
+                          network=network)

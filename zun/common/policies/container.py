@@ -29,6 +29,42 @@ rules = [
         ]
     ),
     policy.DocumentedRuleDefault(
+        name=CONTAINER % 'create:runtime',
+        check_str=base.RULE_ADMIN_API,
+        description='Create a new container with specified runtime.',
+        operations=[
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'create:privileged',
+        check_str=base.RULE_DENY_EVERYBODY,
+        description=('Create a new privileged container.'
+                     'Warning: the privileged container has a big security '
+                     'risk so be caution if you want to enable this feature'),
+        operations=[
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'create:image_pull_policy',
+        check_str=base.RULE_ADMIN_API,
+        description=('Create a new container with specified image pull '
+                     'policy.'),
+        operations=[
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
         name=CONTAINER % 'delete',
         check_str=base.RULE_ADMIN_OR_OWNER,
         description='Delete a container.',
@@ -69,6 +105,98 @@ rules = [
             {
                 'path': '/v1/containers/{container_ident}',
                 'method': 'GET'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'get_one:host',
+        check_str=base.RULE_ADMIN_API,
+        description='Retrieve the host field of containers.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            },
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'PATCH'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'get_one:image_pull_policy',
+        check_str=base.RULE_ADMIN_API,
+        description='Retrieve the image_pull_policy field of containers.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            },
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'PATCH'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'get_one:privileged',
+        check_str=base.RULE_ADMIN_API,
+        description='Retrieve the privileged field of containers.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            },
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'PATCH'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'get_one:runtime',
+        check_str=base.RULE_ADMIN_API,
+        description='Retrieve the runtime field of containers.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'GET'
+            },
+            {
+                'path': '/v1/containers',
+                'method': 'POST'
+            },
+            {
+                'path': '/v1/containers/{container_ident}',
+                'method': 'PATCH'
             }
         ]
     ),
@@ -369,6 +497,28 @@ rules = [
             {
                 'path': ('/v1/containers/'
                          '{container_ident}/remove_security_group'),
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'rebuild',
+        check_str=base.RULE_ADMIN_OR_OWNER,
+        description='Rebuild a container.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}/rebuild',
+                'method': 'POST'
+            }
+        ]
+    ),
+    policy.DocumentedRuleDefault(
+        name=CONTAINER % 'resize_container',
+        check_str=base.RULE_ADMIN_OR_OWNER,
+        description='Resize an existing  container.',
+        operations=[
+            {
+                'path': '/v1/containers/{container_ident}/resize_container',
                 'method': 'POST'
             }
         ]

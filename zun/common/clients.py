@@ -15,7 +15,6 @@
 from cinderclient import client as cinderclient
 from glanceclient import client as glanceclient
 from neutronclient.v2_0 import client as neutronclient
-from novaclient import client as novaclient
 
 from zun.common import exception
 from zun.common import keystone
@@ -29,7 +28,6 @@ class OpenStackClients(object):
         self.context = context
         self._keystone = None
         self._glance = None
-        self._nova = None
         self._neutron = None
         self._cinder = None
 
@@ -42,10 +40,6 @@ class OpenStackClients(object):
         return self.url_for(service_type='container',
                             interface=endpoint_type,
                             region_name=region_name)
-
-    @property
-    def auth_url(self):
-        return self.keystone().auth_url
 
     @property
     def auth_token(self):
@@ -66,37 +60,12 @@ class OpenStackClients(object):
         if self._glance:
             return self._glance
 
-        endpoint_type = self._get_client_option('glance', 'endpoint_type')
-        region_name = self._get_client_option('glance', 'region_name')
         glanceclient_version = self._get_client_option('glance', 'api_version')
-        endpoint = self.url_for(service_type='image',
-                                interface=endpoint_type,
-                                region_name=region_name)
-        args = {
-            'endpoint': endpoint,
-            'auth_url': self.auth_url,
-            'token': self.auth_token,
-            'username': None,
-            'password': None,
-            'cacert': self._get_client_option('glance', 'ca_file'),
-            'cert': self._get_client_option('glance', 'cert_file'),
-            'key': self._get_client_option('glance', 'key_file'),
-            'insecure': self._get_client_option('glance', 'insecure')
-        }
-        self._glance = glanceclient.Client(glanceclient_version, **args)
+        session = self.keystone().session
+        self._glance = glanceclient.Client(glanceclient_version,
+                                           session=session)
 
         return self._glance
-
-    @exception.wrap_keystone_exception
-    def nova(self):
-        if self._nova:
-            return self._nova
-
-        nova_api_version = self._get_client_option('nova', 'api_version')
-        session = self.keystone().session
-        self._nova = novaclient.Client(nova_api_version, session=session)
-
-        return self._nova
 
     @exception.wrap_keystone_exception
     def neutron(self):
@@ -104,6 +73,9 @@ class OpenStackClients(object):
             return self._neutron
 
         session = self.keystone().session
+        session.verify = self._get_client_option('neutron', 'ca_file') or True
+        if self._get_client_option('neutron', 'insecure'):
+            session.verify = False
         endpoint_type = self._get_client_option('neutron', 'endpoint_type')
         self._neutron = neutronclient.Client(session=session,
                                              endpoint_type=endpoint_type)
@@ -115,6 +87,10 @@ class OpenStackClients(object):
         if self._cinder:
             return self._cinder
 
+        session = self.keystone().session
+        session.verify = self._get_client_option('cinder', 'ca_file') or True
+        if self._get_client_option('cinder', 'insecure'):
+            session.verify = False
         cinder_api_version = self._get_client_option('cinder', 'api_version')
         endpoint_type = self._get_client_option('cinder', 'endpoint_type')
         kwargs = {

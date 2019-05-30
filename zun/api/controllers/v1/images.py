@@ -20,19 +20,29 @@ from zun.api.controllers.v1 import collection
 from zun.api.controllers.v1.schemas import images as schema
 from zun.api.controllers.v1.views import images_view as view
 from zun.api import utils as api_utils
+from zun.api import validation
 from zun.common import exception
 from zun.common.i18n import _
 from zun.common import policy
 from zun.common import utils
-from zun.common import validation
+import zun.conf
 from zun import objects
 
+CONF = zun.conf.CONF
 LOG = logging.getLogger(__name__)
 
 
 def check_policy_on_image(image, action):
     context = pecan.request.context
     policy.enforce(context, action, image, action=action)
+
+
+def _get_host(host_ident):
+    try:
+        return api_utils.get_resource('ComputeNode', host_ident)
+    except exception.ComputeNodeNotFound:
+        msg = _("The host %s does not exist.") % host_ident
+        raise exception.InvalidValue(msg)
 
 
 class ImageCollection(collection.Collection):
@@ -64,6 +74,14 @@ class ImagesController(base.Controller):
     _custom_actions = {
         'search': ['GET']
     }
+
+    @pecan.expose('json')
+    @exception.wrap_pecan_controller_exception
+    def delete(self, image_id):
+        context = pecan.request.context
+        policy.enforce(context, "image:delete", action="image:delete")
+        image = utils.get_image(image_id)
+        return pecan.request.compute_api.image_delete(context, image)
 
     @pecan.expose('json')
     @exception.wrap_pecan_controller_exception
@@ -121,9 +139,11 @@ class ImagesController(base.Controller):
         context = pecan.request.context
         policy.enforce(context, "image:pull",
                        action="image:pull")
+        host = _get_host(image_dict.pop('host'))
         image_dict['project_id'] = context.project_id
         image_dict['user_id'] = context.user_id
         repo_tag = image_dict.get('repo')
+        image_dict['host'] = host.hostname
         image_dict['repo'], image_dict['tag'] = utils.parse_image_name(
             repo_tag)
         new_image = objects.Image(context, **image_dict)
@@ -138,6 +158,12 @@ class ImagesController(base.Controller):
     @exception.wrap_pecan_controller_exception
     @validation.validate_query_param(pecan.request, schema.query_param_search)
     def search(self, image, image_driver=None, exact_match=False):
+        """Search a specific image
+
+        :param image:  Name of the image.
+        :param image_driver: Name of the image driver (glance, docker).
+        :param exact_match: if True, exact match the image name.
+        """
         context = pecan.request.context
         policy.enforce(context, "image:search",
                        action="image:search")
@@ -149,8 +175,9 @@ class ImagesController(base.Controller):
             raise exception.InvalidValue(_('Valid exact_match values are: %s')
                                          % bools)
         # Valiadtion accepts 'None' so need to convert it to None
-        if image_driver:
-            image_driver = api_utils.string_or_none(image_driver)
+        image_driver = api_utils.string_or_none(image_driver)
+        if not image_driver:
+            image_driver = CONF.default_image_driver
 
         return pecan.request.compute_api.image_search(context, image,
                                                       image_driver,

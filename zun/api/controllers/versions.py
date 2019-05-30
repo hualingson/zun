@@ -45,10 +45,32 @@ REST_API_VERSION_HISTORY = """REST API Version History:
     * 1.10 - Make delete container async
     * 1.11 - Add mounts to container create
     * 1.12 - Add support to stop container before delete
+    * 1.13 - Add support for listing networks of a container
+    * 1.14 - Add support to rename the container from update api
+    * 1.15 - Remove add_security_group and remove_security_group
+    * 1.16 - Modify restart_policy to capsule spec content
+    * 1.17 - Add support for detaching ports
+    * 1.18 - Modify the response of network list
+    * 1.19 - Introduce container resize API
+    * 1.20 - Convert type of 'command' from string to list
+    * 1.21 - Add support privileged
+    * 1.22 - Add healthcheck to container create
+    * 1.23 - Add attribute 'type' to parameter 'mounts'
+    * 1.24 - Add exposed_ports to container
+    * 1.25 - Encode/Decode archive file
+    * 1.26 - Introduce Quota support
+    * 1.27 - Add support for deleting networks
+    * 1.28 - Add support cpuset
+    * 1.29 - Add enable_cpu_pinning to compute_node
+    * 1.30 - Introduce API resource for representing private registry
+    * 1.31 - Add 'registry_id' to containers
+    * 1.32 - Make capsule deletion asynchronized
+    * 1.33 - Add 'finish_time' to container actions
+    * 1.34 - Add 'init_containers' to capsule
 """
 
 BASE_VER = '1.1'
-CURRENT_MAX_VER = '1.12'
+CURRENT_MAX_VER = '1.34'
 
 
 class Version(object):

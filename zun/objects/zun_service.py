@@ -21,7 +21,8 @@ class ZunService(base.ZunPersistentObject, base.ZunObject):
 
     # Version 1.0: Initial version
     # Version 1.1: Add update method
-    VERSION = '1.1'
+    # Version 1.2: Add availability_zone field
+    VERSION = '1.2'
 
     fields = {
         'id': fields.IntegerField(),
@@ -29,9 +30,11 @@ class ZunService(base.ZunPersistentObject, base.ZunObject):
         'binary': fields.StringField(nullable=True),
         'disabled': fields.BooleanField(),
         'disabled_reason': fields.StringField(nullable=True),
-        'last_seen_up': fields.DateTimeField(nullable=True),
+        'last_seen_up': fields.DateTimeField(nullable=True,
+                                             tzinfo_aware=False),
         'forced_down': fields.BooleanField(),
         'report_count': fields.IntegerField(),
+        'availability_zone': fields.StringField(nullable=True),
     }
 
     @staticmethod

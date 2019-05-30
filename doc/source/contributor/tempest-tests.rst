@@ -38,10 +38,30 @@ for details.
 Run the test
 ============
 
+Edit ``/opt/stack/tempest/etc/tempest.conf``:
+
+   * Add the ``[container_service]`` section,
+     configure ``min_microversion`` and ``max_microversion``:
+
+     .. code-block:: ini
+
+        [container_service]
+        min_microversion=1.26
+        max_microversion=1.26
+
+   .. note::
+
+      You might need to modify the min/max microversion based on your
+      test environment.
+
 Navigate to tempest directory::
 
     cd /opt/stack/tempest
 
 Run this command::
 
-    tox -eall-plugin -- zun_tempest_plugin.tests.tempest.api
+    tempest run --regex zun_tempest_plugin.tests.tempest.api
+
+To run a single test case, run with the test case name, for example::
+
+    tempest run --regex zun_tempest_plugin.tests.tempest.api.test_containers.TestContainer.test_list_containers

@@ -29,14 +29,20 @@ class HostState(object):
 
         # Mutable available resources.
         # These will change as resources are virtually "consumed".
+        self.mem_available = 0
         self.mem_total = 0
         self.mem_free = 0
         self.mem_used = 0
         self.cpus = 0
         self.cpu_used = 0
+        self.disk_total = 0
+        self.disk_used = 0
         self.numa_topology = None
         self.labels = None
         self.pci_stats = None
+        self.disk_quota_supported = False
+        self.runtimes = []
+        self.enable_cpu_pinning = False
 
         # Resource oversubscription values for the compute host:
         self.limits = {}
@@ -57,12 +63,26 @@ class HostState(object):
 
     def _update_from_compute_node(self, compute_node):
         """Update information about a host from a Compute object"""
+        self.mem_available = compute_node.mem_available
         self.mem_total = compute_node.mem_total
         self.mem_free = compute_node.mem_free
         self.mem_used = compute_node.mem_used
         self.cpus = compute_node.cpus
         self.cpu_used = compute_node.cpu_used
+        self.disk_total = compute_node.disk_total
+        self.disk_used = compute_node.disk_used
         self.numa_topology = compute_node.numa_topology
         self.labels = compute_node.labels
         self.pci_stats = pci_stats.PciDeviceStats(
             stats=compute_node.pci_device_pools)
+        self.disk_quota_supported = compute_node.disk_quota_supported
+        self.runtimes = compute_node.runtimes
+        self.enable_cpu_pinning = compute_node.enable_cpu_pinning
+
+    def __repr__(self):
+        return ("%(host)s ram: %(free_ram)sMB "
+                "disk: %(free_disk)sGB cpus: %(free_cpu)s" %
+                {'host': self.hostname,
+                 'free_ram': self.mem_free,
+                 'free_disk': self.disk_total - self.disk_used,
+                 'free_cpu': self.cpus - self.cpu_used})

@@ -43,7 +43,7 @@ class CinderAPI(object):
     def search_volume(self, volume):
         if uuidutils.is_uuid_like(volume):
             try:
-                volume = self.cinder.volumes.get(volume)
+                volume = self.get(volume)
             except cinder_exception.NotFound:
                 raise exception.VolumeNotFound(volume=volume)
         else:
@@ -107,18 +107,19 @@ class CinderAPI(object):
     def terminate_connection(self, volume_id, connector):
         return self.cinder.volumes.terminate_connection(volume_id, connector)
 
-    def attach(self, volume_id, mountpoint, hostname):
+    def attach(self, volume_id, mountpoint, hostname, container_uuid=None):
         return self.cinder.volumes.attach(volume=volume_id,
-                                          instance_uuid=None,
+                                          instance_uuid=container_uuid,
                                           mountpoint=mountpoint,
                                           host_name=hostname)
 
-    def detach(self, volume_id):
+    def detach(self, volume_map):
+        volume_id = volume_map.cinder_volume_id
         attachment_id = None
         volume = self.get(volume_id)
         attachments = volume.attachments or {}
         for am in attachments:
-            if am['host_name'].lower() == CONF.host.lower():
+            if am['server_id'] == volume_map.container_uuid:
                 attachment_id = am['attachment_id']
                 break
 

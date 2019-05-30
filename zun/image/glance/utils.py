@@ -34,8 +34,8 @@ def create_glanceclient(context):
     return osc.glance()
 
 
-def find_image(context, image_ident):
-    matches = find_images(context, image_ident, exact_match=True)
+def find_image(context, image_ident, tag):
+    matches = find_images(context, image_ident, tag, exact_match=True)
     LOG.debug('Found matches %s ', matches)
     if len(matches) == 0:
         raise exception.ImageNotFound(image=image_ident)
@@ -47,7 +47,7 @@ def find_image(context, image_ident):
     return matches[0]
 
 
-def find_images(context, image_ident, exact_match):
+def find_images(context, image_ident, tag, exact_match):
     glance = create_glanceclient(context)
     if uuidutils.is_uuid_like(image_ident):
         images = []
@@ -65,7 +65,12 @@ def find_images(context, image_ident, exact_match):
             images = [i for i in images if i.name == image_ident]
         else:
             images = [i for i in images if image_ident in i.name]
-
+        if tag and len(images) > 0:
+            if len(images) == 1:
+                if images[0].tags and tag not in images[0].tags:
+                    del images[0]
+            else:
+                images = [i for i in images if tag in i.tags]
     return images
 
 

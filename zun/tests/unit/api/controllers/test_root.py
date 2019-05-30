@@ -28,16 +28,16 @@ class TestRootController(api_base.FunctionalTest):
             'default_version':
             {'id': 'v1',
              'links': [{'href': 'http://localhost/v1/', 'rel': 'self'}],
-             'max_version': '1.12',
+             'max_version': '1.34',
              'min_version': '1.1',
              'status': 'CURRENT'},
             'description': 'Zun is an OpenStack project which '
-            'aims to provide container management.',
+            'aims to provide containers service.',
             'name': 'OpenStack Zun API',
             'versions': [{'id': 'v1',
                           'links': [{'href': 'http://localhost/v1/',
                                      'rel': 'self'}],
-                          'max_version': '1.12',
+                          'max_version': '1.34',
                           'min_version': '1.1',
                           'status': 'CURRENT'}]}
 
@@ -64,26 +64,36 @@ class TestRootController(api_base.FunctionalTest):
                        'rel': 'self'},
                       {'href': 'http://localhost/hosts/',
                        'rel': 'bookmark'}],
+            'availability_zones': [
+                {'href': 'http://localhost/v1/availability_zones/',
+                 'rel': 'self'},
+                {'href': 'http://localhost/availability_zones/',
+                 'rel': 'bookmark'}],
             'images': [{'href': 'http://localhost/v1/images/',
                         'rel': 'self'},
                        {'href': 'http://localhost/images/',
-                        'rel': 'bookmark'}]}
-
-        self.experimental_expected = {
-            'media_types':
-            [{'base': 'application/json',
-              'type': 'application/vnd.openstack.zun.experimental+json'}],
-            'links': [{'href': 'http://localhost/experimental/',
-                       'rel': 'self'},
-                      {'href':
-                       'https://docs.openstack.org/developer'
-                       '/zun/dev/api-spec-v1.html',
-                       'type': 'text/html', 'rel': 'describedby'}],
-            'id': 'experimental',
-            'capsules': [{'href': 'http://localhost/experimental/capsules/',
+                        'rel': 'bookmark'}],
+            'networks': [{'href': 'http://localhost/v1/networks/',
+                          'rel': 'self'},
+                         {'href': 'http://localhost/networks/',
+                          'rel': 'bookmark'}],
+            'capsules': [{'href': 'http://localhost/v1/capsules/',
                           'rel': 'self'},
                          {'href': 'http://localhost/capsules/',
-                          'rel': 'bookmark'}]}
+                          'rel': 'bookmark'}],
+            'quotas': [{'href': 'http://localhost/v1/quotas/',
+                        'rel': 'self'},
+                       {'href': 'http://localhost/quotas/',
+                        'rel': 'bookmark'}],
+            'quota_classes': [{'href': 'http://localhost/v1/quota_classes/',
+                               'rel': 'self'},
+                              {'href': 'http://localhost/quota_classes/',
+                               'rel': 'bookmark'}],
+            'registries': [{'href': 'http://localhost/v1/registries/',
+                            'rel': 'self'},
+                           {'href': 'http://localhost/registries/',
+                            'rel': 'bookmark'}],
+        }
 
     def make_app(self, paste_file):
         file_name = self.get_path(paste_file)
@@ -97,10 +107,6 @@ class TestRootController(api_base.FunctionalTest):
     def test_v1_controller(self):
         response = self.app.get('/v1/')
         self.assertEqual(self.v1_expected, response.json)
-
-    def test_experimental_controller(self):
-        response = self.app.get('/experimental/')
-        self.assertEqual(self.experimental_expected, response.json)
 
     def test_get_not_found(self):
         response = self.app.get('/a/bogus/url', expect_errors=True)
@@ -159,14 +165,3 @@ class TestRootController(api_base.FunctionalTest):
 
         response = app.get('/v1/containers', expect_errors=True)
         self.assertEqual(401, response.status_int)
-
-    def test_auth_with_experimental_access(self):
-        paste_file = \
-            "zun/tests/unit/api/controllers/auth-experimental-access.ini"
-        app = self.make_app(paste_file)
-
-        response = app.get('/', expect_errors=True)
-        self.assertEqual(401, response.status_int)
-
-        response = app.get('/experimental/')
-        self.assertEqual(self.experimental_expected, response.json)

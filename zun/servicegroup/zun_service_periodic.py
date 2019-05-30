@@ -15,8 +15,8 @@
 from oslo_log import log
 from oslo_service import periodic_task
 
+from zun.common import context
 from zun import objects
-from zun.service import periodic
 
 
 LOG = log.getLogger(__name__)
@@ -32,10 +32,11 @@ class ZunServicePeriodicTasks(periodic_task.PeriodicTasks):
         self.zun_service_ref = None
         self.host = conf.host
         self.binary = binary
+        self.availability_zone = conf.default_availability_zone
         super(ZunServicePeriodicTasks, self).__init__(conf)
 
     @periodic_task.periodic_task(run_immediately=True)
-    @periodic.set_context
+    @context.set_context
     def update_zun_service(self, ctx):
         LOG.debug('Update zun_service')
         if self.zun_service_ref is None:
@@ -45,11 +46,15 @@ class ZunServicePeriodicTasks(periodic_task.PeriodicTasks):
             if self.zun_service_ref is None:
                 zun_service_dict = {
                     'host': self.host,
-                    'binary': self.binary
+                    'binary': self.binary,
+                    'availability_zone': self.availability_zone
                 }
                 self.zun_service_ref = objects.ZunService(
                     ctx, **zun_service_dict)
                 self.zun_service_ref.create()
+            else:
+                self.zun_service_ref.availability_zone = \
+                    self.availability_zone
         self.zun_service_ref.report_state_up()
 
 

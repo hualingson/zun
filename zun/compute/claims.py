@@ -18,9 +18,12 @@ Claim objects for use with resource tracking.
 """
 
 from oslo_log import log as logging
+import random
 
 from zun.common import exception
 from zun.common.i18n import _
+from zun import objects
+
 
 LOG = logging.getLogger(__name__)
 
@@ -37,6 +40,10 @@ class NopClaim(object):
 
     @property
     def cpu(self):
+        return 0
+
+    @property
+    def disk(self):
         return 0
 
     def __enter__(self):
@@ -77,24 +84,38 @@ class Claim(NopClaim):
         self._pci_requests = pci_requests
 
         # Check claim at constructor to avoid mess code
-        # Raise exception ComputeResourcesUnavailable if claim failed
+        # Raise exception ResourcesUnavailable if claim failed
         self._claim_test(resources, limits)
+        if container.cpu_policy == 'dedicated':
+            container.cpuset = objects.container.Cpuset()
+            self.claim_cpuset_cpu_for_container(container, limits)
+            self.claim_cpuset_mem_for_container(container, limits)
 
     @property
     def memory(self):
-        mem_str = "0"
-        if self.container.memory:
-            mem_str = self.container.memory[:-1]
-        return int(mem_str)
+        return int(self.container.memory or "0")
 
     @property
     def cpu(self):
         return self.container.cpu or 0
 
+    @property
+    def disk(self):
+        return self.container.disk or 0
+
     def abort(self):
         """Requiring claimed resources has failed or been aborted."""
         LOG.debug("Aborting claim: %s", self)
         self.tracker.abort_container_claim(self.context, self.container)
+
+    def claim_cpuset_cpu_for_container(self, container, limits):
+        available_cpu = list(set(limits['cpuset']['cpuset_cpu']) -
+                             set(limits['cpuset']['cpuset_cpu_pinned']))
+        cpuset_cpu_usage = random.sample(available_cpu, int(self.cpu))
+        container.cpuset.cpuset_cpus = set(cpuset_cpu_usage)
+
+    def claim_cpuset_mem_for_container(self, container, limits):
+        container.cpuset.cpuset_mems = set(limits['cpuset']['node'])
 
     def _claim_test(self, resources, limits=None):
         """Test if this claim can be satisfied.
@@ -114,15 +135,19 @@ class Claim(NopClaim):
         # unlimited:
         memory_limit = limits.get('memory')
         cpu_limit = limits.get('cpu')
+        disk_limit = limits.get('disk')
+        cpuset_limit = limits.get('cpuset', None)
 
         LOG.info('Attempting claim: memory %(memory)s, '
-                 'cpu %(cpu).02f CPU',
-                 {'memory': self.memory, 'cpu': self.cpu})
+                 'cpu %(cpu).02f CPU, disk %(disk)s',
+                 {'memory': self.memory, 'cpu': self.cpu, 'disk': self.disk})
 
         reasons = [self._test_memory(resources, memory_limit),
                    self._test_cpu(resources, cpu_limit),
-                   self._test_pci()]
-        # TODO(Shunli): test numa here
+                   self._test_disk(resources, disk_limit),
+                   self._test_pci(),
+                   self._test_cpuset_cpu(resources, cpuset_limit),
+                   self._test_cpuset_mem(resources, cpuset_limit)]
         reasons = [r for r in reasons if r is not None]
         if len(reasons) > 0:
             raise exception.ResourcesUnavailable(reason="; ".join(reasons))
@@ -154,6 +179,40 @@ class Claim(NopClaim):
 
         return self._test(type_, unit, total, used, requested, limit)
 
+    def _test_cpuset_cpu(self, resources, limit):
+        if limit:
+            type_ = _("cpuset_cpu")
+            unit = "core"
+            total = len(limit['cpuset_cpu'])
+            used = len(limit['cpuset_cpu_pinned'])
+            requested = self.cpu
+
+            return self._test(type_, unit, total, used, requested,
+                              len(limit['cpuset_cpu']))
+        else:
+            return
+
+    def _test_cpuset_mem(self, resources, limit):
+        if limit:
+            type_ = _("cpuset_mem")
+            unit = "M"
+            total = resources.numa_topology.nodes[limit['node']].mem_total
+            used = 0
+            requested = self.memory
+
+            return self._test(type_, unit, total, used, requested,
+                              limit['cpuset_mem'])
+        else:
+            return
+
+    def _test_disk(self, resources, limit):
+        type_ = _("disk")
+        unit = "GB"
+        total = resources.disk_total
+        used = resources.disk_used
+        requested = self.disk
+        return self._test(type_, unit, total, used, requested, limit)
+
     def _test(self, type_, unit, total, used, requested, limit):
         """Test if the type resource needed for a claim can be allocated."""
 
@@ -179,3 +238,43 @@ class Claim(NopClaim):
                       '%(unit)s < requested %(requested)s %(unit)s') %
                     {'type': type_, 'free': free, 'unit': unit,
                      'requested': requested})
+
+
+class UpdateClaim(Claim):
+    """A declaration that a compute host operation will require free resources.
+
+    Claims serve as marker objects that resources are being held until the
+    update_available_resource audit process runs to do a full reconciliation
+    of resource usage.
+
+    This information will be used to help keep the local compute hosts's
+    ComputeNode model in sync to aid the scheduler in making efficient / more
+    correct decisions with respect to host selection.
+    """
+
+    def __init__(self, context, new_container, old_container, tracker,
+                 resources, limits=None):
+        # Stash a copy of the container at the current point of time
+        self.new_container = new_container.obj_clone()
+        self.old_container = old_container.obj_clone()
+        super(UpdateClaim, self).__init__(
+            context, new_container, tracker, resources,
+            objects.ContainerPCIRequests(requests=[]), limits)
+
+    @property
+    def memory(self):
+        new_mem_str = self.new_container.memory or "0"
+        old_mem_str = self.old_container.memory or "0"
+        return int(new_mem_str) - int(old_mem_str)
+
+    @property
+    def cpu(self):
+        new_cpu = self.new_container.cpu or 0
+        old_cpu = self.old_container.cpu or 0
+        return new_cpu - old_cpu
+
+    def abort(self):
+        """Requiring claimed resources has failed or been aborted."""
+        LOG.debug("Aborting claim: %s", self)
+        self.tracker.abort_container_update_claim(
+            self.context, self.new_container, self.old_container)

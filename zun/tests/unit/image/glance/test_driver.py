@@ -44,7 +44,7 @@ class TestDriver(base.BaseTestCase):
         mock_should_pull_image.return_value = False
         mock_search.return_value = None
         self.assertRaises(exception.ImageNotFound, self.driver.pull_image,
-                          None, 'nonexisting', 'tag', 'never')
+                          None, 'nonexisting', 'tag', 'never', None)
 
     @mock.patch.object(driver.GlanceDriver,
                        '_search_image_on_host')
@@ -52,14 +52,15 @@ class TestDriver(base.BaseTestCase):
     def test_pull_image_should_pull_no_image_present_locally(
             self, mock_should_pull_image, mock_search):
         mock_should_pull_image.return_value = False
+        checksum = 'd41d8cd98f00b204e9800998ecf8427e'
         mock_search.return_value = {'image': 'nginx', 'path': 'xyz',
-                                    'checksum': 'xxx'}
+                                    'checksum': checksum}
         mock_open_file = mock.mock_open()
         with mock.patch('zun.image.glance.driver.open', mock_open_file):
             self.assertEqual(({'image': 'nginx', 'path': 'xyz',
-                               'checksum': 'xxx'}, True),
+                               'checksum': checksum}, True),
                              self.driver.pull_image(None, 'nonexisting',
-                                                    'tag', 'never'))
+                                                    'tag', 'never', None))
         mock_open_file.assert_any_call('xyz', 'rb')
 
     @mock.patch.object(driver.GlanceDriver,
@@ -72,12 +73,9 @@ class TestDriver(base.BaseTestCase):
         mock_should_pull_image.return_value = True
         mock_search.return_value = {'image': 'nginx', 'path': 'xyz',
                                     'checksum': 'xxx'}
-        mock_open_file = mock.mock_open()
-        with mock.patch('zun.image.glance.driver.open', mock_open_file):
-            mock_find_image.side_effect = Exception
-            self.assertRaises(exception.ZunException, self.driver.pull_image,
-                              None, 'nonexisting', 'tag', 'always')
-        mock_open_file.assert_any_call('xyz', 'rb')
+        mock_find_image.side_effect = Exception
+        self.assertRaises(exception.ZunException, self.driver.pull_image,
+                          None, 'nonexisting', 'tag', 'always', None)
 
     @mock.patch.object(driver.GlanceDriver,
                        '_search_image_on_host')
@@ -91,20 +89,23 @@ class TestDriver(base.BaseTestCase):
                                             'checksum': 'xxx'}
         image_meta = mock.MagicMock()
         image_meta.id = '1234'
+        image_meta.name = 'image'
+        image_meta.tags = ['latest']
         mock_find_image.return_value = image_meta
         mock_download_image.return_value = 'content'
         CONF.set_override('images_directory', self.test_dir, group='glance')
         out_path = os.path.join(self.test_dir, '1234' + '.tar')
         mock_open_file = mock.mock_open()
         with mock.patch('zun.image.glance.driver.open', mock_open_file):
-            ret = self.driver.pull_image(None, 'image', 'latest', 'always')
-        mock_open_file.assert_any_call('xyz', 'rb')
+            ret = self.driver.pull_image(None, 'image', 'latest', 'always',
+                                         None)
         mock_open_file.assert_any_call(out_path, 'wb')
         self.assertTrue(mock_search_on_host.called)
         self.assertTrue(mock_should_pull_image.called)
         self.assertTrue(mock_find_image.called)
         self.assertTrue(mock_download_image.called)
-        self.assertEqual(({'image': 'image', 'path': out_path}, False), ret)
+        self.assertEqual(({'image': 'image', 'path': out_path,
+                           'tags': ['latest']}, False), ret)
 
     @mock.patch('zun.common.utils.should_pull_image')
     def test_pull_image_not_found(self, mock_should_pull_image):
@@ -112,7 +113,7 @@ class TestDriver(base.BaseTestCase):
         with mock.patch('zun.image.glance.utils.find_image') as mock_find:
             mock_find.side_effect = exception.ImageNotFound
             self.assertRaises(exception.ImageNotFound, self.driver.pull_image,
-                              None, 'nonexisting', 'tag', 'always')
+                              None, 'nonexisting', 'tag', 'always', None)
 
     @mock.patch('zun.image.glance.utils.find_images')
     def test_search_image_found(self, mock_find_images):
@@ -158,10 +159,10 @@ class TestDriver(base.BaseTestCase):
         self.assertTrue(mock_update_image.called)
 
     @mock.patch('zun.image.glance.utils.delete_image')
-    def test_delete_image(self, mock_delete_image):
+    def test_delete_committed_image(self, mock_delete_image):
         image_meta = mock.MagicMock()
         image_meta.id = '1234'
         mock_delete_image.return_value = [image_meta]
-        ret = self.driver.delete_image(None, 'id')
+        ret = self.driver.delete_committed_image(None, 'id')
         self.assertEqual(1, len(ret))
         self.assertTrue(mock_delete_image.called)

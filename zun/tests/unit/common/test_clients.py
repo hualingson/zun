@@ -12,10 +12,11 @@
 
 import mock
 
+from cinderclient import client as cinderclient
 from glanceclient import client as glanceclient
+from neutronclient.v2_0 import client as neutronclient
 
 from zun.common import clients
-from zun.common import exception
 import zun.conf
 from zun.tests import base
 
@@ -25,7 +26,8 @@ class ClientsTest(base.BaseTestCase):
     def setUp(self):
         super(ClientsTest, self).setUp()
 
-        zun.conf.CONF.set_override('auth_uri', 'http://server.test:5000/v2.0',
+        zun.conf.CONF.set_override('www_authenticate_uri',
+                                   'http://server.test:5000/v2.0',
                                    group='keystone_authtoken')
         zun.conf.CONF.import_opt('api_version', 'zun.conf.glance_client',
                                  group='glance_client')
@@ -56,27 +58,17 @@ class ClientsTest(base.BaseTestCase):
                                               interface=fake_endpoint)
 
     @mock.patch.object(glanceclient, 'Client')
-    @mock.patch.object(clients.OpenStackClients, 'url_for')
-    @mock.patch.object(clients.OpenStackClients, 'auth_url')
-    def _test_clients_glance(self, expected_region_name, mock_auth, mock_url,
+    @mock.patch.object(clients.OpenStackClients, 'keystone')
+    def _test_clients_glance(self, expected_region_name, mock_keystone,
                              mock_call):
-        mock_auth.__get__ = mock.Mock(return_value="keystone_url")
+        mock_keystone.return_value = mock.Mock(session='fake-session')
         con = mock.MagicMock()
-        con.auth_token = "3bcc3d3a03f44e3d8377f9247b0ad155"
-        con.auth_url = "keystone_url"
-        mock_url.return_value = "url_from_keystone"
         obj = clients.OpenStackClients(con)
         obj._glance = None
         obj.glance()
         mock_call.assert_called_once_with(
             zun.conf.CONF.glance_client.api_version,
-            endpoint='url_from_keystone', username=None,
-            token='3bcc3d3a03f44e3d8377f9247b0ad155',
-            auth_url='keystone_url',
-            password=None, cacert=None, cert=None, key=None, insecure=False)
-        mock_url.assert_called_once_with(service_type='image',
-                                         interface='publicURL',
-                                         region_name=expected_region_name)
+            session='fake-session')
 
     def test_clients_glance(self):
         self._test_clients_glance(None)
@@ -86,29 +78,49 @@ class ClientsTest(base.BaseTestCase):
                                    'myregion', group='glance_client')
         self._test_clients_glance('myregion')
 
-    def test_clients_glance_noauth(self):
+    @mock.patch.object(clients.OpenStackClients, 'keystone')
+    def test_clients_glance_cached(self, mock_keystone):
+        mock_keystone.return_value = mock.Mock(session='fake-session')
         con = mock.MagicMock()
-        con.auth_token = None
-        con.auth_token_info = None
-        auth_url = mock.PropertyMock(name="auth_url",
-                                     return_value="keystone_url")
-        type(con).auth_url = auth_url
-        con.get_url_for = mock.Mock(name="get_url_for")
-        con.get_url_for.return_value = "url_from_keystone"
-        obj = clients.OpenStackClients(con)
-        obj._glance = None
-        self.assertRaises(exception.AuthorizationFailure, obj.glance)
-
-    @mock.patch.object(clients.OpenStackClients, 'url_for')
-    @mock.patch.object(clients.OpenStackClients, 'auth_url')
-    def test_clients_glance_cached(self, mock_auth, mock_url):
-        mock_auth.__get__ = mock.Mock(return_value="keystone_url")
-        con = mock.MagicMock()
-        con.auth_token = "3bcc3d3a03f44e3d8377f9247b0ad155"
-        con.auth_url = "keystone_url"
-        mock_url.return_value = "url_from_keystone"
         obj = clients.OpenStackClients(con)
         obj._glance = None
         glance = obj.glance()
         glance_cached = obj.glance()
         self.assertEqual(glance, glance_cached)
+
+    @mock.patch.object(neutronclient, 'Client')
+    @mock.patch.object(clients.OpenStackClients, 'keystone')
+    def test_clients_neturon(self, mock_keystone, mock_call):
+        ca_file = '/testpath'
+        insecure = True
+        zun.conf.CONF.set_override('ca_file', ca_file,
+                                   group='neutron_client')
+        zun.conf.CONF.set_override('insecure', insecure,
+                                   group='neutron_client')
+        con = mock.MagicMock()
+        con.auth_token = "3bcc3d3a03f44e3d8377f9247b0ad155"
+        con.auth_url = "keystone_url"
+        obj = clients.OpenStackClients(con)
+        obj._neutron = None
+        obj.neutron()
+        mock_call.assert_called_once()
+
+    @mock.patch.object(cinderclient, 'Client')
+    @mock.patch.object(clients.OpenStackClients, 'keystone')
+    def test_clients_cinder(self, mock_keystone, mock_call):
+        ca_file = '/testpath'
+        insecure = True
+        endpoint_type = 'internalURL'
+        zun.conf.CONF.set_override('ca_file', ca_file,
+                                   group='cinder_client')
+        zun.conf.CONF.set_override('insecure', insecure,
+                                   group='cinder_client')
+        zun.conf.CONF.set_override('endpoint_type', endpoint_type,
+                                   group='cinder_client')
+        con = mock.MagicMock()
+        con.auth_token = "3bcc3d3a03f44e3d8377f9247b0ad155"
+        con.auth_url = "keystone_url"
+        obj = clients.OpenStackClients(con)
+        obj._cinder = None
+        obj.cinder()
+        mock_call.assert_called_once()

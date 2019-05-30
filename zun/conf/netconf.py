@@ -31,19 +31,17 @@ Possible values:
 Related options:
 
 * docker_remote_api_host
-* etcd_host
 * wsproxy_host
 * host_ip
 * my_block_storage_ip
 """),
-    cfg.StrOpt('host',
-               default=socket.gethostname(),
-               sample_default='<current_hostname>',
-               help="""
+    cfg.HostAddressOpt('host',
+                       default=socket.gethostname(),
+                       sample_default='<current_hostname>',
+                       help="""
 Hostname, FQDN or IP address of this host. This can be an opaque identifier.
 It is not necessarily a hostname, FQDN, or IP address. However, the node name
-must be valid within an AMQP key, and if using ZeroMQ, a valid hostname,
-FQDN, or IP address.
+must be valid within an AMQP key.
 
 Possible values:
 

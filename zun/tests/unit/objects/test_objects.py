@@ -344,24 +344,33 @@ class TestObject(test_base.TestCase, _TestObject):
 # For more information on object version testing, read
 # https://docs.openstack.org/zun/latest/
 object_data = {
-    'Container': '1.24-bd8b0f179b62157772955f0a76735a39',
-    'VolumeMapping': '1.1-50df6202f7846a136a91444c38eba841',
-    'Image': '1.0-0b976be24f4f6ee0d526e5c981ce0633',
+    'Capsule': '1.0-fb200a8860db6d6fd9b2cf4b9efbf3a3',
+    'CapsuleContainer': '1.0-c7f84d8e07d854ddfc20140f2e6dd703',
+    'CapsuleInitContainer': '1.0-c7f84d8e07d854ddfc20140f2e6dd703',
+    'Container': '1.39-1ac92cdfe46067b990ed147038229a81',
+    'Cpuset': '1.0-06c4e6335683c18b87e2e54080f8c341',
+    'Volume': '1.0-034768f2f5c5e89acb5ee45c6d3f3403',
+    'VolumeMapping': '1.5-57febc66526185a75a744637e7a387c7',
+    'Image': '1.2-80504fdd797e9dd86128a91680e876ad',
     'MyObj': '1.0-34c4b1aadefd177b13f9a2f894cc23cd',
-    'NUMANode': '1.0-cba878b70b2f8b52f1e031b41ac13b4e',
+    'NUMANode': '1.0-6da86e2dd7f28253e2b9ac60c002ea8f',
     'NUMATopology': '1.0-b54086eda7e4b2e6145ecb6ee2c925ab',
     'ResourceClass': '1.1-d661c7675b3cd5b8c3618b68ba64324e',
     'ResourceProvider': '1.0-92b427359d5a4cf9ec6c72cbe630ee24',
-    'ZunService': '1.1-b1549134bfd5271daec417ca8cabc77e',
-    'Capsule': '1.4-d8474488e25a484cf859428944eb05d3',
+    'ZunService': '1.2-deff2a74a9ce23baa231ae12f39a6189',
     'PciDevice': '1.1-6e3f0851ad1cf12583e6af4df1883979',
-    'ComputeNode': '1.9-e8536102d3b28cb3378e9e26f508cd72',
+    'ComputeNode': '1.13-3c122f455c38d3665d327c05d2df6617',
     'PciDevicePool': '1.0-3f5ddc3ff7bfa14da7f6c7e9904cc000',
     'PciDevicePoolList': '1.0-15ecf022a68ddbb8c2a6739cfc9f8f5e',
+    'Quota': '1.3-fcaaaf4b6e983207edba27a1cf8e51ab',
+    'QuotaClass': '1.2-4739583a70891fbc145031228fb8001e',
     'ContainerPCIRequest': '1.0-b060f9f9f734bedde79a71a4d3112ee0',
     'ContainerPCIRequests': '1.0-7b8f7f044661fe4e24e6949c035af2c4',
-    'ContainerAction': '1.1-b0c721f9e10c6c0d1e41e512c49eb877',
-    'ContainerActionEvent': '1.0-2974d0a6f5d4821fd4e223a88c10181a'
+    'ContainerAction': '1.2-4ae05fe3d1576c211c2425e4db190ef2',
+    'ContainerActionEvent': '1.0-2974d0a6f5d4821fd4e223a88c10181a',
+    'Network': '1.1-26e8d37a54e5fc905ede657744a221d9',
+    'ExecInstance': '1.0-59464e7b96db847c0abb1e96d3cec30a',
+    'Registry': '1.0-36c2053fbc30e0021630e657dd1699c9',
 }
 
 

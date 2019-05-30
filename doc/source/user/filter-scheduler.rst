@@ -17,7 +17,7 @@ If the Scheduler cannot find candidates for the container, it means that
 there are no appropriate host where that container can be scheduled.
 
 The Filter Scheduler has a set of ``filters`` that are built-in. If the
-built-in filters is insufficient, you can implement your own filters with your
+built-in filters are insufficient, you can implement your own filters with your
 filtering algorithm.
 
 There are many standard filter classes which may be used
@@ -31,6 +31,8 @@ There are many standard filter classes which may be used
   labels.
 * ComputeFilter - filters hosts that are operational and enabled. In general,
   you should always enable this filter.
+* RuntimeFilter - filters hosts by their runtime. It passes hosts with
+  the specified runtime.
 
 Configuring Filters
 -------------------
@@ -47,7 +49,7 @@ The default values for these settings in zun.conf are:
 ::
 
     --filter_scheduler.available_filters=zun.scheduler.filters.all_filters
-    --filter_scheduler.enabled_filters=RamFilter,CPUFilter,ComputeFilter
+    --filter_scheduler.enabled_filters=RamFilter,CPUFilter,ComputeFilter,RuntimeFilter
 
 With this configuration, all filters in ``zun.scheduler.filters``
 would be available, and by default the RamFilter and CPUFilter would be

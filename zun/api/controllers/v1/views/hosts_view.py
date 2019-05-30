@@ -29,6 +29,11 @@ _basic_keys = (
     'labels',
     'mem_used',
     'cpu_used',
+    'disk_used',
+    'disk_total',
+    'disk_quota_supported',
+    'runtimes',
+    'enable_cpu_pinning',
 )
 
 

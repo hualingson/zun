@@ -20,10 +20,15 @@ from zun.common import exception
 from zun.common import utils
 from zun.common.utils import check_container_id
 from zun.common.utils import translate_exception
+import zun.conf
 from zun import objects
 from zun.objects.container import Container
 from zun.tests import base
 from zun.tests.unit.db import utils as db_utils
+from zun.tests.unit.objects import utils as obj_utils
+
+
+CONF = zun.conf.CONF
 
 
 class TestUtils(base.TestCase):
@@ -60,6 +65,26 @@ class TestUtils(base.TestCase):
         self.assertEqual(('test-test', 'test'),
                          utils.parse_image_name('test-test:test'))
 
+    def test_parse_image_name_with_default_registry(self):
+        CONF.set_override('default_registry', 'test.io', group='docker')
+        self.assertEqual(('test.io/test', 'latest'),
+                         utils.parse_image_name('test'))
+        self.assertEqual(('test.io/test/test', 'latest'),
+                         utils.parse_image_name('test/test'))
+        self.assertEqual(('other.com/test/test', 'latest'),
+                         utils.parse_image_name('other.com/test/test'))
+
+    def test_parse_image_name_with_custom_registry(self):
+        registry = obj_utils.get_test_registry(self.context, domain='test.io')
+        self.assertEqual(('test.io/test', 'latest'),
+                         utils.parse_image_name('test', registry=registry))
+        self.assertEqual(('test.io/test/test', 'latest'),
+                         utils.parse_image_name('test/test',
+                                                registry=registry))
+        self.assertEqual(('other.com/test/test', 'latest'),
+                         utils.parse_image_name('other.com/test/test',
+                                                registry=registry))
+
     def test_get_image_pull_policy(self):
         self.assertEqual('always',
                          utils.get_image_pull_policy('always',
@@ -67,7 +92,7 @@ class TestUtils(base.TestCase):
         self.assertEqual('always',
                          utils.get_image_pull_policy(None,
                                                      'latest'))
-        self.assertEqual('ifnotpresent',
+        self.assertEqual('always',
                          utils.get_image_pull_policy(None,
                                                      '2.0'))
 
@@ -124,30 +149,6 @@ class TestUtils(base.TestCase):
         security_groups = ["not_attached_security_group_name"]
         self.assertRaises(exception.ZunException, utils.get_security_group_ids,
                           self.context, security_groups)
-
-    def test_check_capsule_template(self):
-        with self.assertRaisesRegex(
-            exception.InvalidCapsuleTemplate, "kind fields need to "
-                                              "be set as capsule or Capsule"):
-            params = ({"kind": "test", "spec": {"containers": []}})
-            utils.check_capsule_template(params)
-
-        with self.assertRaisesRegex(
-                exception.InvalidCapsuleTemplate, "No Spec found"):
-            params = ({"kind": "capsule"})
-            utils.check_capsule_template(params)
-
-        with self.assertRaisesRegex(
-                exception.InvalidCapsuleTemplate,
-                "No valid containers field"):
-            params = ({"kind": "capsule", "spec": {}})
-            utils.check_capsule_template(params)
-
-        params = ({"kind": "capsule", "restartPolicy": "Always", "spec": {
-            "containers": [{"image": "test1"}]
-        }})
-        utils.check_capsule_template(params)
-        self.assertEqual(params["restart_policy"], "always")
 
     def test_capsule_get_container_spec(self):
         with self.assertRaisesRegex(
@@ -215,3 +216,49 @@ class TestUtils(base.TestCase):
                 mock.ANY,
                 test_image['uuid'])
             self.assertEqual(test_image['uuid'], image.uuid)
+
+    @mock.patch.object(objects.ContainerActionEvent, 'event_start')
+    @mock.patch.object(objects.ContainerActionEvent, 'event_finish')
+    def test_wart_container_event(self, mock_finish, mock_start):
+        container = Container(self.context, **db_utils.get_test_container())
+
+        @utils.wrap_container_event(prefix='compute')
+        def fake_event(self, context, container):
+            pass
+
+        fake_event(self, self.context, container=container)
+
+        self.assertTrue(mock_start.called)
+        self.assertTrue(mock_finish.called)
+
+    @mock.patch.object(objects.ContainerActionEvent, 'event_start')
+    @mock.patch.object(objects.ContainerActionEvent, 'event_finish')
+    def test_wrap_container_event_return(self, mock_finish, mock_start):
+        container = Container(self.context, **db_utils.get_test_container())
+
+        @utils.wrap_container_event(prefix='compute')
+        def fake_event(self, context, container):
+            return True
+
+        retval = fake_event(self, self.context, container=container)
+
+        self.assertTrue(retval)
+        self.assertTrue(mock_start.called)
+        self.assertTrue(mock_finish.called)
+
+    @mock.patch.object(objects.ContainerActionEvent, 'event_start')
+    @mock.patch.object(objects.ContainerActionEvent, 'event_finish')
+    def test_wrap_container_event_log_exception(self, mock_finish, mock_start):
+        container = Container(self.context, **db_utils.get_test_container())
+
+        @utils.wrap_container_event(prefix='compute')
+        def fake_event(self, context, container):
+            raise exception.ZunException()
+
+        self.assertRaises(exception.ZunException, fake_event,
+                          self, self.context, container=container)
+
+        self.assertTrue(mock_start.called)
+        self.assertTrue(mock_finish.called)
+        args, kwargs = mock_finish.call_args
+        self.assertIsInstance(kwargs['exc_val'], exception.ZunException)

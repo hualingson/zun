@@ -16,16 +16,18 @@
 # https://docs.openstack.org/oslo.i18n/latest/user/usage.html
 
 """Utilities and helper functions."""
+import base64
+import binascii
 import eventlet
 import functools
+import inspect
 import mimetypes
-import time
 
 from oslo_concurrency import lockutils
 from oslo_concurrency import processutils
 from oslo_context import context as common_context
 from oslo_log import log as logging
-from oslo_service import loopingcall
+from oslo_utils import excutils
 from oslo_utils import strutils
 import pecan
 import six
@@ -33,29 +35,34 @@ import six
 from zun.api import utils as api_utils
 from zun.common import clients
 from zun.common import consts
+from zun.common.docker_image import reference as docker_image
 from zun.common import exception
 from zun.common.i18n import _
 from zun.common import privileged
 import zun.conf
 from zun.network import neutron
+from zun import objects
 
 CONF = zun.conf.CONF
 LOG = logging.getLogger(__name__)
 NETWORK_ATTACH_EXTERNAL = 'network:attach_external_network'
 
-synchronized = lockutils.synchronized_with_prefix('zun-')
+synchronized = lockutils.synchronized_with_prefix(consts.NAME_PREFIX)
 
 VALID_STATES = {
     'commit': [consts.RUNNING, consts.STOPPED, consts.PAUSED],
-    'delete': [consts.CREATED, consts.ERROR, consts.STOPPED, consts.DELETED],
+    'delete': [consts.CREATED, consts.ERROR, consts.STOPPED, consts.DELETED,
+               consts.DEAD],
     'delete_force': [consts.CREATED, consts.CREATING, consts.ERROR,
                      consts.RUNNING, consts.STOPPED, consts.UNKNOWN,
-                     consts.DELETED],
+                     consts.DELETED, consts.DEAD, consts.RESTARTING,
+                     consts.REBUILDING],
     'delete_after_stop': [consts.RUNNING, consts.CREATED, consts.ERROR,
-                          consts.STOPPED, consts.DELETED],
+                          consts.STOPPED, consts.DELETED, consts.DEAD],
     'start': [consts.CREATED, consts.STOPPED, consts.ERROR],
     'stop': [consts.RUNNING],
     'reboot': [consts.CREATED, consts.RUNNING, consts.STOPPED, consts.ERROR],
+    'rebuild': [consts.CREATED, consts.RUNNING, consts.STOPPED, consts.ERROR],
     'pause': [consts.RUNNING],
     'unpause': [consts.PAUSED],
     'kill': [consts.RUNNING],
@@ -75,10 +82,13 @@ VALID_STATES = {
     'add_security_group': [consts.CREATED, consts.RUNNING, consts.STOPPED,
                            consts.PAUSED],
     'remove_security_group': [consts.CREATED, consts.RUNNING, consts.STOPPED,
-                              consts.PAUSED]
+                              consts.PAUSED],
+    'resize_container': [consts.CREATED, consts.RUNNING, consts.STOPPED,
+                         consts.PAUSED]
 }
 
 VALID_CONTAINER_FILED = {
+    'name': 'name',
     'image': 'image',
     'command': 'command',
     'args': 'args',
@@ -107,6 +117,13 @@ def validate_container_state(container, action):
             id=container.uuid,
             action=action,
             actual_state=container.status)
+
+
+def validate_image_driver(image_driver):
+    if image_driver not in CONF.image_driver_list:
+        detail = _("Invalid input for image_driver, "
+                   "it should be within the image drivers list")
+        raise exception.ValidationError(detail=detail)
 
 
 def safe_rstrip(value, chars=None):
@@ -145,14 +162,26 @@ def allow_all_content_types(f):
     return _do_allow_certain_content_types(f, mimetypes.types_map.values())
 
 
-def parse_image_name(image):
-    image_parts = image.split(':', 1)
+def parse_image_name(image, driver=None, registry=None):
+    image_parts = docker_image.Reference.parse(image)
 
-    image_repo = image_parts[0]
+    image_repo = image_parts['name']
+    if driver is None:
+        driver = CONF.default_image_driver
+    if driver == 'glance':
+        image_tag = ''
+        return image_repo, image_tag
+
     image_tag = 'latest'
+    if image_parts['tag']:
+        image_tag = image_parts['tag']
 
-    if len(image_parts) > 1:
-        image_tag = image_parts[1]
+    domain, _ = image_parts.split_hostname()
+    if not domain:
+        if registry:
+            image_repo = '%s/%s' % (registry.domain, image_repo)
+        elif CONF.docker.default_registry:
+            image_repo = '%s/%s' % (CONF.docker.default_registry, image_repo)
 
     return image_repo, image_tag
 
@@ -216,43 +245,9 @@ def check_container_id(function):
     return decorated_function
 
 
-def poll_until(retriever, condition=lambda value: value,
-               sleep_time=1, time_out=None, success_msg=None,
-               timeout_msg=None):
-    """Retrieves object until it passes condition, then returns it.
-
-    If time_out_limit is passed in, PollTimeOut will be raised once that
-    amount of time is elapsed.
-    """
-    start_time = time.time()
-
-    def poll_and_check():
-        obj = retriever()
-        if condition(obj):
-            raise loopingcall.LoopingCallDone(retvalue=obj)
-        if time_out is not None and time.time() - start_time > time_out:
-            raise exception.PollTimeOut
-
-    try:
-        poller = loopingcall.FixedIntervalLoopingCall(
-            f=poll_and_check).start(sleep_time, initial_delay=False)
-        poller.wait()
-        LOG.info(success_msg)
-    except exception.PollTimeOut:
-        LOG.error(timeout_msg)
-        raise
-    except Exception as e:
-        LOG.exception("Unexpected exception occurred: %s",
-                      six.text_type(e))
-        raise
-
-
 def get_image_pull_policy(image_pull_policy, image_tag):
     if not image_pull_policy:
-        if image_tag == 'latest':
-            image_pull_policy = 'always'
-        else:
-            image_pull_policy = 'ifnotpresent'
+        image_pull_policy = 'always'
     return image_pull_policy
 
 
@@ -314,7 +309,7 @@ def parse_floating_cpu(spec):
 
 
 def get_security_group_ids(context, security_groups, **kwargs):
-    if security_groups is None:
+    if not security_groups:
         return None
     else:
         neutron = clients.OpenStackClients(context).neutron()
@@ -341,6 +336,10 @@ def custom_execute(*cmd, **kwargs):
                                      error=six.text_type(e))
 
 
+def get_root_helper():
+    return 'sudo zun-rootwrap %s' % CONF.rootwrap_config
+
+
 @privileged.default.entrypoint
 def execute_root(*cmd, **kwargs):
     # NOTE(kiennt): Set run_as_root=False because if it is set to True, the
@@ -362,26 +361,6 @@ def execute(*cmd, **kwargs):
         return custom_execute(*cmd, **kwargs)
 
 
-def check_capsule_template(tpl):
-    # TODO(kevinz): add volume spec check
-    kind_field = tpl.get('kind')
-    if kind_field not in ['capsule', 'Capsule']:
-        raise exception.InvalidCapsuleTemplate("kind fields need to be "
-                                               "set as capsule or Capsule")
-    # Align the Capsule restartPolicy with container restart_policy
-    if 'restartPolicy' in tpl.keys():
-        tpl['restartPolicy'] = \
-            VALID_CAPSULE_RESTART_POLICY[tpl['restartPolicy']]
-        tpl[VALID_CAPSULE_FIELD['restartPolicy']] = tpl.pop('restartPolicy')
-
-    spec_field = tpl.get('spec')
-    if spec_field is None:
-        raise exception.InvalidCapsuleTemplate("No Spec found")
-    if spec_field.get('containers') is None:
-        raise exception.InvalidCapsuleTemplate("No valid containers field")
-    return spec_field
-
-
 def capsule_get_container_spec(spec_field):
     containers_spec = spec_field.get('containers')
     containers_num = len(containers_spec)
@@ -399,7 +378,22 @@ def capsule_get_container_spec(spec_field):
             container_spec[VALID_CONTAINER_FILED[key]] = \
                 container_spec.pop(key)
 
-    return containers_spec
+    init_containers_spec = spec_field.get('initContainers')
+    if init_containers_spec is not None:
+        for i in range(0, len(init_containers_spec)):
+            container_spec = init_containers_spec[i]
+            if 'image' not in container_spec.keys():
+                raise exception.InvalidCapsuleTemplate("Container "
+                                                       "image is needed")
+            # Remap the Capsule's container fields to native Zun
+            # container fields.
+            for key in list(container_spec.keys()):
+                container_spec[VALID_CONTAINER_FILED[key]] = \
+                    container_spec.pop(key)
+    else:
+        init_containers_spec = []
+
+    return containers_spec, init_containers_spec
 
 
 def capsule_get_volume_spec(spec_field):
@@ -437,8 +431,10 @@ def is_all_projects(search_opts):
     if all_projects:
         try:
             all_projects = strutils.bool_from_string(all_projects, True)
-        except ValueError as err:
-            raise exception.InvalidValue(six.text_type(err))
+        except ValueError:
+            bools = ', '.join(strutils.TRUE_STRINGS + strutils.FALSE_STRINGS)
+            raise exception.InvalidValue(_('Valid all_projects values are: %s')
+                                         % bools)
     else:
         all_projects = False
     return all_projects
@@ -462,6 +458,14 @@ def get_image(image_id):
     return image
 
 
+def get_registry(registry_id):
+    registry = api_utils.get_resource('Registry', registry_id)
+    if not registry:
+        raise exception.RegistryNotFound(registry=registry_id)
+
+    return registry
+
+
 def check_for_restart_policy(container_dict):
     """Check for restart policy input
 
@@ -483,6 +487,36 @@ def check_for_restart_policy(container_dict):
         container_dict.get('restart_policy')['MaximumRetryCount'] = '0'
 
 
+def build_exposed_ports(ports):
+
+    def validate_protocol(protocol):
+        if protocol not in ('tcp', 'udp'):
+            raise exception.InvalidValue(_(
+                "value %s is an invalid protocol") % protocol)
+
+    def validate_port(port):
+        try:
+            int(port)
+        except ValueError:
+            msg = _("value %s is invalid as publish port.") % port
+            raise exception.InvalidValue(msg)
+
+    exposed_ports = {}
+    for key, value in ports.items():
+        try:
+            port, protocol = key.split('/')
+        except ValueError:
+            port, protocol = key, 'tcp'
+
+        validate_protocol(protocol)
+        validate_port(port)
+
+        key = '/'.join([port, protocol])
+        exposed_ports[key] = value
+
+    return exposed_ports
+
+
 def build_requested_networks(context, nets):
     """Build requested networks by calling neutron client
 
@@ -502,8 +536,7 @@ def build_requested_networks(context, nets):
                                        'router:external':
                                            network.get('router:external'),
                                        'shared': network.get('shared'),
-                                       'v4-fixed-ip': '',
-                                       'v6-fixed-ip': '',
+                                       'fixed_ip': '',
                                        'preserve_on_delete': True})
         elif net.get('network'):
             network = neutron_api.get_neutron_network(net['network'])
@@ -512,19 +545,21 @@ def build_requested_networks(context, nets):
                                        'router:external':
                                            network.get('router:external'),
                                        'shared': network.get('shared'),
-                                       'v4-fixed-ip':
-                                           net.get('v4-fixed-ip', ''),
-                                       'v6-fixed-ip':
+                                       'fixed_ip':
+                                           net.get('fixed_ip') or
+                                           net.get('v4-fixed-ip', '') or
                                            net.get('v6-fixed-ip', ''),
                                        'preserve_on_delete': False})
     if not requested_networks:
         # Find an available neutron net and create docker network by
         # wrapping the neutron net.
-        neutron_net = neutron_api.get_available_network()
-        requested_networks.append({'network': neutron_net['id'],
+        network = neutron_api.get_available_network()
+        requested_networks.append({'network': network['id'],
                                    'port': '',
-                                   'v4-fixed-ip': '',
-                                   'v6-fixed-ip': '',
+                                   'router:external':
+                                       network.get('router:external'),
+                                   'shared': network.get('shared'),
+                                   'fixed_ip': '',
                                    'preserve_on_delete': False})
 
     check_external_network_attach(context, requested_networks)
@@ -539,3 +574,145 @@ def check_external_network_attach(context, nets):
             if net.get('router:external') and not net.get('shared'):
                 raise exception.ExternalNetworkAttachForbidden(
                     network_uuid=net['network'])
+
+
+class EventReporter(object):
+    """Context manager to report container action events."""
+
+    def __init__(self, context, event_name, *container_uuids):
+        self.context = context
+        self.event_name = event_name
+        self.container_uuids = container_uuids
+
+    def __enter__(self):
+        for uuid in self.container_uuids:
+            objects.ContainerActionEvent.event_start(
+                self.context, uuid, self.event_name, want_result=False)
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for uuid in self.container_uuids:
+            objects.ContainerActionEvent.event_finish(
+                self.context, uuid, self.event_name, exc_val=exc_val,
+                exc_tb=exc_tb, want_result=False)
+        return False
+
+
+class FinishAction(object):
+    """Context manager to finish container actions."""
+
+    def __init__(self, context, action_name, *container_uuids):
+        self.context = context
+        self.action_name = action_name
+        self.container_uuids = container_uuids
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        for uuid in self.container_uuids:
+            objects.ContainerAction.action_finish(
+                self.context, uuid, self.action_name, exc_val=exc_val,
+                exc_tb=exc_tb, want_result=False)
+        return False
+
+
+def get_wrapped_function(function):
+    """Get the method at the bottom of a stack of decorators."""
+    if not hasattr(function, '__closure__') or not function.__closure__:
+        return function
+
+    def _get_wrapped_function(function):
+        if not hasattr(function, '__closure__') or not function.__closure__:
+            return None
+
+        for closure in function.__closure__:
+            func = closure.cell_contents
+
+            deeper_func = _get_wrapped_function(func)
+            if deeper_func:
+                return deeper_func
+            elif hasattr(closure.cell_contents, '__call__'):
+                return closure.cell_contents
+
+        return function
+
+    return _get_wrapped_function(function)
+
+
+def wrap_container_event(prefix, finish_action=None):
+    """Warps a method to log the event taken on the container, and result.
+
+    This decorator wraps a method to log the start and result of an event, as
+    part of an action taken on a container.
+    """
+    def helper(function):
+
+        @functools.wraps(function)
+        def decorated_function(self, context, *args, **kwargs):
+            wrapped_func = get_wrapped_function(function)
+            keyed_args = inspect.getcallargs(wrapped_func, self, context,
+                                             *args, **kwargs)
+            container_uuid = keyed_args['container'].uuid
+            event_name = '{0}_{1}'.format(prefix, function.__name__)
+
+            if finish_action is not None:
+                with FinishAction(
+                    context, finish_action, container_uuid
+                ), EventReporter(
+                    context, event_name, container_uuid
+                ):
+                    return function(self, context, *args, **kwargs)
+            else:
+                with EventReporter(context, event_name, container_uuid):
+                    return function(self, context, *args, **kwargs)
+        return decorated_function
+    return helper
+
+
+def wrap_exception():
+    def helper(function):
+
+        @functools.wraps(function)
+        def decorated_function(self, context, container, *args, **kwargs):
+            try:
+                return function(self, context, container, *args, **kwargs)
+            except exception.DockerError as e:
+                with excutils.save_and_reraise_exception(reraise=False):
+                    LOG.error("Error occurred while calling Docker API: %s",
+                              six.text_type(e))
+            except Exception as e:
+                with excutils.save_and_reraise_exception(reraise=False):
+                    LOG.exception("Unexpected exception: %s", six.text_type(e))
+        return decorated_function
+    return helper
+
+
+def is_close(x, y, rel_tol=1e-06, abs_tol=0.0):
+    return abs(x - y) <= max(rel_tol * max(abs(x), abs(y)), abs_tol)
+
+
+def is_less_than(x, y):
+    if isinstance(x, int) and isinstance(y, int):
+        return x < y
+    if isinstance(x, float) or isinstance(y, float):
+        return False if (x - y) >= 0 or is_close(x, y) else True
+
+
+def encode_file_data(data):
+    if six.PY3 and isinstance(data, str):
+        data = data.encode('utf-8')
+    return base64.b64encode(data).decode('utf-8')
+
+
+def decode_file_data(data):
+    # Py3 raises binascii.Error instead of TypeError as in Py27
+    try:
+        return base64.b64decode(data)
+    except (TypeError, binascii.Error):
+        raise exception.Base64Exception()
+
+
+def strtime(at):
+    return at.strftime("%Y-%m-%dT%H:%M:%S.%f")

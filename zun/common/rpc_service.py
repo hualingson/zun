@@ -22,10 +22,8 @@ from oslo_utils import importutils
 from zun.common import context
 from zun.common import profiler
 from zun.common import rpc
-from zun.compute import manager as compute_manager
 import zun.conf
 from zun.objects import base as objects_base
-from zun.service import periodic
 from zun.servicegroup import zun_service_periodic as servicegroup
 
 osprofiler = importutils.try_import("osprofiler.profiler")
@@ -62,9 +60,8 @@ class Service(service.Service):
 
     def start(self):
         servicegroup.setup(CONF, self.binary, self.tg)
-        periodic.setup(CONF, self.tg)
         for endpoint in self.endpoints:
-            if isinstance(endpoint, compute_manager.Manager):
+            if hasattr(endpoint, 'init_containers'):
                 endpoint.init_containers(
                     context.get_admin_context(all_projects=True))
             self.tg.add_dynamic_timer(
@@ -87,20 +84,16 @@ class Service(service.Service):
 
 
 class API(object):
-    def __init__(self, transport=None, context=None, topic=None, server=None,
+    def __init__(self, context=None, topic=None, server=None,
                  timeout=None):
         serializer = _init_serializer()
-        if transport is None:
-            exmods = rpc.get_allowed_exmods()
-            transport = messaging.get_rpc_transport(
-                CONF, allowed_remote_exmods=exmods)
         self._context = context
         if topic is None:
             topic = ''
         target = messaging.Target(topic=topic, server=server)
-        self._client = messaging.RPCClient(transport, target,
-                                           serializer=serializer,
-                                           timeout=timeout)
+        self._client = rpc.get_client(target,
+                                      serializer=serializer,
+                                      timeout=timeout)
 
     def _call(self, server, method, *args, **kwargs):
         cctxt = self._client.prepare(server=server)

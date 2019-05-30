@@ -4,14 +4,14 @@
 Manage Zun service
 ==================
 
-Show container management service status
-========================================
+Show service status
+===================
 
 .. rest_method::  GET /v1/services
 
 Enables administrative users to view details for all Zun services.
 
-Container management service status details include service id, binary,
+Service status details include service id, binary,
 host, report count, creation time, last updated time, health status, and
 the reason for disabling service.
 
@@ -25,6 +25,7 @@ Response Codes
 .. rest_status_code:: error status.yaml
 
    - 401
+   - 403
 
 Response Parameters
 -------------------
@@ -34,6 +35,7 @@ Response Parameters
    - X-Openstack-Request-Id: request_id
    - services: services
    - binary: binary
+   - availability_zone: availability_zone
    - created_at: created_at
    - state: state
    - report_count: report_count
@@ -49,8 +51,8 @@ Response Example
    :language: javascript
 
 
-Delete container management service
-===================================
+Delete service
+==============
 
 .. rest_method::  DELETE /v1/services
 
@@ -66,6 +68,8 @@ Response Codes
 .. rest_status_code:: error status.yaml
 
    - 401
+   - 403
+   - 404
 
 Request Parameters
 ------------------
@@ -81,8 +85,8 @@ Response Parameters
 If successful, this method does not return content in the response body.
 
 
-Enable container management service
-===================================
+Enable service
+==============
 
 .. rest_method::  PUT /v1/services/enable
 
@@ -98,6 +102,8 @@ Response Codes
 .. rest_status_code:: error status.yaml
 
    - 401
+   - 403
+   - 404
 
 Request Parameters
 ------------------
@@ -125,8 +131,8 @@ Response Example
    :language: javascript
 
 
-Disable container management service
-====================================
+Disable service
+===============
 
 .. rest_method::  PUT /v1/services/disable
 
@@ -142,6 +148,8 @@ Response Codes
 .. rest_status_code:: error status.yaml
 
    - 401
+   - 403
+   - 404
 
 Request Parameters
 ------------------
@@ -170,8 +178,8 @@ Response Example
    :language: javascript
 
 
-Force down container management service
-=======================================
+Force down service
+==================
 
 .. rest_method::  PUT /v1/services/force_down
 
@@ -187,6 +195,8 @@ Response Codes
 .. rest_status_code:: error status.yaml
 
    - 401
+   - 403
+   - 404
 
 Request Parameters
 ------------------

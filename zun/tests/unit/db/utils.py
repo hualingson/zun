@@ -10,37 +10,24 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 """Zun test utilities."""
-import mock
 
 from oslo_config import cfg
-from oslo_serialization import jsonutils as json
 
+from zun.common import consts
 from zun.common import name_generator
 from zun.db import api as db_api
-from zun.db.etcd import api as etcd_api
+from zun.objects.container import Cpuset
 
 CONF = cfg.CONF
 
-CAPSULE_SPEC = {"kind": "capsule",
-                "capsuleVersion": "beta",
-                "restartPolicy": "Always",
-                "spec": {"containers":
-                         [{"env": {"TEST": "password"},
-                           "image": "test",
-                           "resources":
-                               {"requests": {"cpu": 1, "memory": 1024}},
-                           "volumeMounts": [
-                               {"name": "volume1", "mountPath": "/data1"},
-                               {"name": "volume2", "mountPath": "/data2"}]
-                           }],
-                         "volumes": [
-                             {"name": "volume1",
-                              "cinder": {
-                                  "volumeID":
-                                      "9600e785-9320-4d3f-ba02-04e3d43fddec"}
-                              },
-                             {"name": "volume2",
-                              "cinder": {"size": 5}}]}}
+
+def get_cpuset_obj():
+    return Cpuset._from_dict({'cpuset_cpus': set([0, 1]),
+                              'cpuset_mems': set([0])})
+
+
+def get_cpuset_dict():
+    return {'cpuset_cpus': set([0, 1]), 'cpuset_mems': set([0])}
 
 
 def get_test_container(**kwargs):
@@ -54,28 +41,37 @@ def get_test_container(**kwargs):
         'image': kwargs.get('image', 'ubuntu'),
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
-        'command': kwargs.get('command', 'fake_command'),
+        'command': kwargs.get('command', ['fake_command']),
         'status': kwargs.get('status', 'Running'),
         'status_reason': kwargs.get('status_reason', 'Created Successfully'),
         'task_state': kwargs.get('task_state', None),
         'environment': kwargs.get('environment', {'key1': 'val1',
                                                   'key2': 'val2'}),
         'cpu': kwargs.get('cpu', 1.0),
-        'memory': kwargs.get('memory', '512m'),
+        'memory': kwargs.get('memory', '512'),
         'workdir': kwargs.get('workdir', '/home/ubuntu'),
         'ports': kwargs.get('ports', [80, 443]),
         'hostname': kwargs.get('hostname', 'testhost'),
         'labels': kwargs.get('labels', {'key1': 'val1', 'key2': 'val2'}),
         'meta': kwargs.get('meta', {'key1': 'val1', 'key2': 'val2'}),
         'addresses': kwargs.get('addresses', {
-            'private': [
+            kwargs.get('network', 'private'): [
                 {
-                    'OS-EXT-IPS-MAC:mac_addr': 'fa:16:3e:04:da:76',
-                    'port': '1234567',
+                    'subnet_id': 'f89ae741-999e-4873-b38c-779e3deb8458',
                     'version': 4,
-                    'addr': '10.0.0.12',
-                    'OS-EXT-IPS:type': 'fixed'
+                    'preserve_on_delete': False,
+                    'addr': '172.24.4.4',
+                    'port': kwargs.get('port',
+                                       '22626847-f511-42ee-ab06-8a9764ad2680')
                 },
+                {
+                    'subnet_id': '3e4e9708-d83b-46fb-8591-8143bd66206e',
+                    'version': 6,
+                    'preserve_on_delete': False,
+                    'addr': '2001:db8::5',
+                    'port': kwargs.get('port',
+                                       '22626847-f511-42ee-ab06-8a9764ad2680')
+                }
             ],
         }),
         'image_pull_policy': kwargs.get('image_pull_policy', 'always'),
@@ -92,14 +88,24 @@ def get_test_container(**kwargs):
         'auto_remove': kwargs.get('auto_remove', False),
         'runtime': kwargs.get('runtime', 'runc'),
         'disk': kwargs.get('disk', 20),
+        'auto_heal': kwargs.get('auto_heal', False),
+        'started_at': kwargs.get('started_at'),
+        'privileged': kwargs.get('privileged', False),
+        'healthcheck': kwargs.get('healthcheck',
+                                  {"retries": "2", "timeout": 3,
+                                   "test": "stat /etc/passwd || exit 1",
+                                   "interval": 3}),
+        'exposed_ports': kwargs.get('exposed_ports', {"80/tcp": {}}),
+        'cpu_policy': kwargs.get('cpu_policy', None),
+        'cpuset': kwargs.get('cpuset', None),
+        'registry_id': kwargs.get('registry_id', None),
+        'container_type': kwargs.get('container_type', consts.TYPE_CONTAINER),
+        'capsule_id': kwargs.get('capsule_id', 33),
     }
 
 
 def _get_dbapi():
-    if CONF.database.backend == 'sqlalchemy':
-        dbapi = db_api._get_dbdriver_instance()
-    else:
-        dbapi = etcd_api.get_backend()
+    dbapi = db_api._get_dbdriver_instance()
     return dbapi
 
 
@@ -121,19 +127,15 @@ def create_test_container(**kwargs):
 def get_test_volume_mapping(**kwargs):
     return {
         'id': kwargs.get('id', 38),
-        'uuid': kwargs.get('uuid', 'c0aae414-4462-45ae-9848-1312983d1f7a'),
+        'uuid': kwargs.get('uuid', 'bea6293e-7714-4cd2-abc5-d479a498cee3'),
         'project_id': kwargs.get('project_id', 'fake_project'),
         'user_id': kwargs.get('user_id', 'fake_user'),
-        'volume_id': kwargs.get('volume_id',
-                                '342a140e-efca-4140-9d2a-64221f688fa2'),
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
-        'volume_provider': kwargs.get('volume_provider', 'fake_provider'),
         'container_path': kwargs.get('container_path', 'fake_path'),
         'container_uuid': kwargs.get('container_uuid',
                                      '1aca1705-20f3-4506-8bc3-59685d86a357'),
-        'connection_info': kwargs.get('connection_info', 'fake_info'),
-        'auto_remove': kwargs.get('auto_remove', False),
+        'volume_id': kwargs.get('volume_id', 39),
     }
 
 
@@ -144,6 +146,33 @@ def create_test_volume_mapping(**kwargs):
         del volume_mapping['id']
     dbapi = _get_dbapi()
     return dbapi.create_volume_mapping(kwargs['context'], volume_mapping)
+
+
+def get_test_volume(**kwargs):
+    return {
+        'id': kwargs.get('id', 39),
+        'uuid': kwargs.get('uuid', 'c0aae414-4462-45ae-9848-1312983d1f7a'),
+        'project_id': kwargs.get('project_id', 'fake_project'),
+        'user_id': kwargs.get('user_id', 'fake_user'),
+        'cinder_volume_id': kwargs.get('cinder_volume_id',
+                                       '342a140e-efca-4140-9d2a-64221f688fa2'),
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+        'volume_provider': kwargs.get('volume_provider', 'fake_provider'),
+        'connection_info': kwargs.get('connection_info', 'fake_info'),
+        'auto_remove': kwargs.get('auto_remove', False),
+        'host': kwargs.get('host', 'fake_host'),
+        'contents': kwargs.get('contents', 'fake-contents'),
+    }
+
+
+def create_test_volume(**kwargs):
+    volume = get_test_volume(**kwargs)
+    # Let DB generate ID if it isn't specified explicitly
+    if 'id' not in kwargs:
+        del volume['id']
+    dbapi = _get_dbapi()
+    return dbapi.create_volume(kwargs['context'], volume)
 
 
 def get_test_image(**kwargs):
@@ -158,6 +187,7 @@ def get_test_image(**kwargs):
         'user_id': kwargs.get('user_id', 'fake_user'),
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
+        'host': kwargs.get('host', 'host1'),
     }
 
 
@@ -198,6 +228,7 @@ def get_test_zun_service(**kwargs):
         'report_count': kwargs.get('report_count', 13),
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
+        'availability_zone': kwargs.get('availability_zone', 'fake-zone'),
     }
 
 
@@ -311,12 +342,16 @@ def get_test_numa_topology(**kwargs):
             {
                 "id": 0,
                 "cpuset": [1, 2],
-                "pinned_cpus": []
+                "pinned_cpus": [],
+                "mem_total": 65536,
+                "mem_available": 32768
             },
             {
                 "id": 1,
                 "cpuset": [3, 4],
-                "pinned_cpus": [3, 4]
+                "pinned_cpus": [3, 4],
+                "mem_total": 65536,
+                "mem_available": 32768
             }
         ]
     }
@@ -345,6 +380,11 @@ def get_test_compute_node(**kwargs):
         'labels': kwargs.get('labels', {"dev.type": "product"}),
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
+        'disk_total': kwargs.get('disk_total', 80),
+        'disk_used': kwargs.get('disk_used', 20),
+        'disk_quota_supported': kwargs.get('disk_quota_supported', False),
+        'runtimes': kwargs.get('runtimes', ['runc']),
+        'enable_cpu_pinning': kwargs.get('enable_cpu_pinning', False),
     }
 
 
@@ -354,86 +394,12 @@ def create_test_compute_node(**kwargs):
     return dbapi.create_compute_node(kwargs['context'], compute_host)
 
 
-class FakeEtcdMultipleResult(object):
-    def __init__(self, value):
-        self.children = []
-        for v in value:
-            res = mock.MagicMock()
-            res.value = json.dump_as_bytes(v)
-            self.children.append(res)
-
-
-class FakeEtcdResult(object):
-    def __init__(self, value):
-        self.value = json.dump_as_bytes(value)
-
-
-def get_test_capsule(**kwargs):
-    return {
-        'capsule_version': kwargs.get('capsule_version', 'beta'),
-        'kind': kwargs.get('kind', 'capsule'),
-        'created_at': kwargs.get('created_at'),
-        'updated_at': kwargs.get('updated_at'),
-        'restart_policy': kwargs.get('restart_policy',
-                                     {'Name': 'no',
-                                      'MaximumRetryCount': '0'}),
-        'host_selector': kwargs.get('host_selector'),
-        'id': kwargs.get('id', 42),
-        'uuid': kwargs.get('uuid', 'f2b96c5f-242a-41a0-a736-b6e1fada071b'),
-        'project_id': kwargs.get('project_id', 'fake_project'),
-        'user_id': kwargs.get('user_id', 'fake_user'),
-        'status': kwargs.get('status', 'Running'),
-        'status_reason': kwargs.get('status_reason', 'Created Successfully'),
-        'cpu': kwargs.get('cpu', 1.0),
-        'memory': kwargs.get('memory', '512m'),
-        'spec': kwargs.get('spec', CAPSULE_SPEC),
-        'meta_name': kwargs.get('meta_name', "fake-meta-name"),
-        'meta_labels': kwargs.get('meta_labels', {'key1': 'val1',
-                                                  'key2': 'val2'}),
-        'containers': kwargs.get('container'),
-        'containers_uuids': kwargs.get(
-            'containers_uuids', ['ea8e2a25-2901-438d-8157-de7ffd68d051',
-                                 '6219e0fb-2935-4db2-a3c7-86a2ac3ac84e']),
-        'host': kwargs.get('host', 'localhost'),
-        'addresses': kwargs.get('addresses', {
-            'private': [
-                {
-                    'OS-EXT-IPS-MAC:mac_addr': 'fa:16:3e:04:da:76',
-                    'port': '1234567',
-                    'version': 4,
-                    'addr': '10.0.0.12',
-                    'OS-EXT-IPS:type': 'fixed'
-                },
-            ],
-        }),
-        'volumes_info': kwargs.get(
-            'volumes_info',
-            {'9a6b029d-1a2c-42f3-aac0-dec33e3f7835':
-                'ea8e2a25-2901-438d-8157-de7ffd68d051'}),
-    }
-
-
-def create_test_capsule(**kwargs):
-    """Create test capsule entry in DB and return Capsule DB object.
-
-    Function to be used to create test Capsule objects in the database.
-    :param kwargs: kwargs with overriding values for capsule's attributes.
-    :returns: Test Capsule DB object.
-    """
-    capsule = get_test_capsule(**kwargs)
-    # Let DB generate ID if it isn't specified explicitly
-    if CONF.database.backend == 'sqlalchemy' and 'id' not in kwargs:
-        del capsule['id']
-    dbapi = _get_dbapi()
-    return dbapi.create_capsule(kwargs['context'], capsule)
-
-
 class FakeObject(object):
     def __getitem__(self, key):
         return getattr(self, key)
 
 
-def get_test_action(**kwargs):
+def get_test_action_value(**kwargs):
     action_values = {
         'created_at': kwargs.get('created_at'),
         'updated_at': kwargs.get('updated_at'),
@@ -449,13 +415,19 @@ def get_test_action(**kwargs):
         'message': kwargs.get('message', 'fake-message'),
     }
 
+    return action_values
+
+
+def get_test_action(**kwargs):
+
+    action_values = get_test_action_value(**kwargs)
     fake_action = FakeObject()
     for k, v in action_values.items():
         setattr(fake_action, k, v)
     return fake_action
 
 
-def get_test_action_event(**kwargs):
+def get_test_action_event_value(**kwargs):
 
     event_values = {
         'created_at': kwargs.get('created_at'),
@@ -469,7 +441,151 @@ def get_test_action_event(**kwargs):
         'traceback': kwargs.get('traceback', 'fake-tb'),
     }
 
+    return event_values
+
+
+def get_test_action_event(**kwargs):
+
+    event_values = get_test_action_event_value(**kwargs)
     fake_event = FakeObject()
     for k, v in event_values.items():
         setattr(fake_event, k, v)
     return fake_event
+
+
+def create_test_quota(**kwargs):
+    context = kwargs.get('context')
+    project_id = kwargs.get('project_id', 'fake_project_id')
+    resource = kwargs.get('resource', 'containers')
+    limit = kwargs.get('limit', 100)
+    dbapi = _get_dbapi()
+    return dbapi.quota_create(context, project_id, resource, limit)
+
+
+def create_test_quota_class(**kwargs):
+    context = kwargs.get('context')
+    class_name = kwargs.get('class_name', 'default')
+    resource = kwargs.get('resource', 'containers')
+    limit = kwargs.get('limit', 100)
+    dbapi = _get_dbapi()
+    return dbapi.quota_class_create(context, class_name, resource, limit)
+
+
+def get_test_quota_value(**kwargs):
+    quota_values = {
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+        'id': kwargs.get('id', 123),
+        'project_id': kwargs.get('project_id', 'fake_project_id'),
+        'resource': kwargs.get('resource', 'container'),
+        'hard_limit': kwargs.get('hard_limit', 20),
+        'uuid': kwargs.get('uuid', 'z2b96c5f-242a-41a0-a736-b6e1fada071b'),
+    }
+
+    return quota_values
+
+
+def get_test_quota(**kwargs):
+    quota_values = get_test_quota_value(**kwargs)
+    fake_quota = FakeObject()
+    for k, v in quota_values.items():
+        setattr(fake_quota, k, v)
+
+    return fake_quota
+
+
+def get_test_quota_class_value(**kwargs):
+    quota_values = {
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+        'id': kwargs.get('id', 123),
+        'class_name': kwargs.get('class_name', 'fake_class_name'),
+        'resource': kwargs.get('resource', 'container'),
+        'hard_limit': kwargs.get('hard_limit', 20),
+        'uuid': kwargs.get('uuid', 'z2b96c5b-242a-41a0-a736-b6e1fada071b'),
+    }
+
+    return quota_values
+
+
+def get_test_quota_class(**kwargs):
+    quota_class_values = get_test_quota_class_value(**kwargs)
+    fake_quota_class = FakeObject()
+    for k, v in quota_class_values.items():
+        setattr(fake_quota_class, k, v)
+
+    return fake_quota_class
+
+
+def get_test_network(**kwargs):
+    return {
+        'id': kwargs.get('id', 42),
+        'name': kwargs.get('name', 'fake_name'),
+        'uuid': kwargs.get('uuid', 'z2b96c5b-242a-41a0-a736-b6e1fada071b'),
+        'network_id': kwargs.get('network_id', '0eeftestnetwork'),
+        'project_id': kwargs.get('project_id', 'fake_project'),
+        'user_id': kwargs.get('user_id', 'fake_user'),
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+        'neutron_net_id': kwargs.get('neutron_net_id', 'bar'),
+    }
+
+
+def get_test_exec_instance(**kwargs):
+    return {
+        'id': kwargs.get('id', 43),
+        'container_id': kwargs.get('container_id', 42),
+        'exec_id': kwargs.get('exec_id', 'fake-exec-id'),
+        'token': kwargs.get('token', 'fake-exec-token'),
+        'url': kwargs.get('url', 'fake-url'),
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+    }
+
+
+def create_test_exec_instance(**kwargs):
+    """Create test exec instance entry in DB and return ExecInstance DB object.
+
+    Function to be used to create test ExecInstance objects in the database.
+    :param kwargs: kwargs with overriding values for default attributes.
+    :returns: Test ExecInstance DB object.
+    """
+    exec_inst = get_test_exec_instance(**kwargs)
+    # Let DB generate ID if it isn't specified explicitly
+    if 'id' not in kwargs:
+        del exec_inst['id']
+    dbapi = _get_dbapi()
+    return dbapi.create_exec_instance(kwargs['context'], exec_inst)
+
+
+def create_test_network(**kwargs):
+    network = get_test_network(**kwargs)
+    # Let DB generate ID if it isn't specified explicitly
+    if 'id' not in kwargs:
+        del network['id']
+    dbapi = _get_dbapi()
+    return dbapi.create_network(kwargs['context'], network)
+
+
+def get_test_registry(**kwargs):
+    return {
+        'id': kwargs.get('id', 42),
+        'name': kwargs.get('name', 'fake_name'),
+        'uuid': kwargs.get('uuid', '0b5cdde8-237a-4917-9556-003e5c588c4f'),
+        'project_id': kwargs.get('project_id', 'fake_project'),
+        'user_id': kwargs.get('user_id', 'fake_user'),
+        'created_at': kwargs.get('created_at'),
+        'updated_at': kwargs.get('updated_at'),
+        'domain': kwargs.get('domain', 'test.io'),
+        'username': kwargs.get('username', 'fake_username'),
+        'password': kwargs.get('password', 'fake_password'),
+    }
+
+
+def create_test_registry(**kwargs):
+    registry = get_test_registry(**kwargs)
+    # Let DB generate ID if it isn't specified explicitly
+    if 'id' not in kwargs:
+        del registry['id']
+    dbapi = _get_dbapi()
+    return dbapi.create_registry(kwargs['context'], registry)

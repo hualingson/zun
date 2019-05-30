@@ -9,7 +9,7 @@ stops, pauses, unpauses, restarts, renames, commits, kills, attaches to containe
 gets archive from container, puts archive to container, and adds security group
 for specified container, executes command in a running container, gets logs
 of a container, displays the running processes in a container, resizes
-the tty session used by the exec.
+the tty session used by the exec, list actions and action detail for a container.
 
 Create new container
 ====================
@@ -37,23 +37,29 @@ Request
 
 .. rest_parameters:: parameters.yaml
 
-  - name: name
+  - name: name-request
   - image: image
-  - command: command
-  - cpu: cpu
-  - memory: memory
-  - workdir: workdir
-  - image_pull_policy: image_pull_policy
-  - labels: labels
-  - environment: environment
-  - restart_policy: restart_policy
-  - interactive: interactive
-  - image_driver: image_driver
-  - security_groups: security_groups
+  - command: command-request
+  - cpu: cpu-request
+  - memory: memory-request
+  - workdir: workdir-request
+  - labels: labels-request
+  - environment: environment-request
+  - restart_policy: restart_policy-request
+  - interactive: interactive-request
+  - image_driver: image_driver-request
+  - security_groups: security_groups-request
   - nets: nets
   - runtime: runtime
-  - hostname: hostname
-  - auto_remove: auto_remove
+  - hostname: hostname-request
+  - auto_remove: auto_remove-request
+  - auto_heal: auto_heal-request
+  - availability_zone: container_availability_zone
+  - hints: hints
+  - mounts: mounts
+  - privileged: privileged-request
+  - healthcheck: healthcheck-request
+  - exposed_ports: exposed_ports
 
 Request Example
 ----------------
@@ -77,7 +83,6 @@ Response
   - cpu: cpu
   - memory: memory
   - workdir: workdir
-  - image_pull_policy: image_pull_policy
   - environment: environment
   - restart_policy: restart_policy
   - interactive: interactive
@@ -90,6 +95,14 @@ Response
   - status_reason: status_reason
   - ports: ports
   - auto_remove: auto_remove
+  - auto_heal: auto_heal
+  - privileged: privileged
+  - healthcheck: healthcheck
+  - user_id: user_id
+  - project_id: project_id
+  - disk: disk
+  - registry_id: registry_id
+  - cpu_policy: cpu_policy
 
 
 Response Example
@@ -117,6 +130,21 @@ Response Codes
    - 401
    - 403
 
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+  - name: name_query
+  - image: image_query
+  - project_id: project_id_query
+  - user_id: user_id_query
+  - memory: memory_query
+  - host: host_query
+  - task_state: task_state_query
+  - status: status_query
+  - auto_remove: auto_remove_query
+
 Response
 --------
 
@@ -134,7 +162,6 @@ Response
   - cpu: cpu
   - memory: memory
   - workdir: workdir
-  - image_pull_policy: image_pull_policy
   - environment: environment
   - restart_policy: restart_policy
   - interactive: interactive
@@ -146,6 +173,13 @@ Response
   - task_state: task_state
   - status_reason: status_reason
   - ports: ports
+  - privileged: privileged
+  - healthcheck: healthcheck
+  - user_id: user_id
+  - project_id: project_id
+  - disk: disk
+  - registry_id: registry_id
+  - cpu_policy: cpu_policy
 
 Response Example
 ----------------
@@ -196,7 +230,6 @@ Response
   - cpu: cpu
   - memory: memory
   - workdir: workdir
-  - image_pull_policy: image_pull_policy
   - environment: environment
   - restart_policy: restart_policy
   - interactive: interactive
@@ -208,6 +241,13 @@ Response
   - task_state: task_state
   - status_reason: status_reason
   - ports: ports
+  - privileged: privileged
+  - healthcheck: healthcheck
+  - user_id: user_id
+  - project_id: project_id
+  - disk: disk
+  - registry_id: registry_id
+  - cpu_policy: cpu_policy
 
 Response Example
 ----------------
@@ -261,7 +301,7 @@ This request does not return anything in the response body.
 Kill a container
 ================
 
-.. rest_method:: POST /v1/containers/{container_ident}/kill?signal={signal}
+.. rest_method:: POST /v1/containers/{container_ident}/kill
 
 Kill a running container.
 
@@ -345,7 +385,7 @@ Update information of container
 
 .. rest_method:: PATCH /v1/containers/{container_ident}
 
-Update information of one container attributes. Currently only `cpu` and
+Update information of one container attributes. Currently only `cpu`, name and
 `memory` can be updated.
 
 Response Codes
@@ -370,6 +410,7 @@ Request
   - container_ident: container_ident
   - memory: memory
   - cpu: cpu
+  - name: name
 
 Request Example
 ----------------
@@ -395,7 +436,6 @@ Return new container with updated attributes.
   - cpu: cpu
   - memory: memory
   - workdir: workdir
-  - image_pull_policy: image_pull_policy
   - environment: environment
   - restart_policy: restart_policy
   - interactive: interactive
@@ -407,6 +447,13 @@ Return new container with updated attributes.
   - task_state: task_state
   - status_reason: status_reason
   - ports: ports
+  - privileged: privileged
+  - healthcheck: healthcheck
+  - user_id: user_id
+  - project_id: project_id
+  - disk: disk
+  - registry_id: registry_id
+  - cpu_policy: cpu_policy
 
 Response Example
 ----------------
@@ -454,7 +501,7 @@ This request does not return anything in the response body.
 Stop a container
 ================
 
-.. rest_method:: POST /v1/containers/{container_ident}/stop?timeout={timeout}
+.. rest_method:: POST /v1/containers/{container_ident}/stop
 
 Stop a container.
 
@@ -563,10 +610,50 @@ This request does not return anything in the response body.
 
   - X-Openstack-Request-Id: request_id
 
+Rebuild a container
+===================
+
+.. rest_method:: POST /v1/containers/{container_ident}/rebuild
+
+Rebuild a container.
+
+Response Codes
+--------------
+
+.. rest_status_code:: success status.yaml
+
+   - 202
+
+.. rest_status_code:: error status.yaml
+
+   - 401
+   - 403
+   - 404
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - container_ident: container_ident
+   - image: image
+   - image_driver: image_driver
+
+Response
+--------
+
+This request does not return anything in the response body.
+
+.. rest_parameters:: parameters.yaml
+
+   - X-Openstack-Request-Id: request_id
+
+
+
 Restart a container
 ===================
 
-.. rest_method:: POST /v1/containers/{container_ident}/reboot?timeout={timeout}
+.. rest_method:: POST /v1/containers/{container_ident}/reboot
 
 Restart a container.
 
@@ -605,7 +692,7 @@ This request does not return anything in the response body.
 Rename a container
 ==================
 
-.. rest_method:: POST /v1/containers/{container_ident}/rename?name={new_name}
+.. rest_method:: POST /v1/containers/{container_ident}/rename
 
 Rename a container.
 
@@ -647,7 +734,6 @@ Response
   - cpu: cpu
   - memory: memory
   - workdir: workdir
-  - image_pull_policy: image_pull_policy
   - environment: environment
   - restart_policy: restart_policy
   - interactive: interactive
@@ -659,6 +745,11 @@ Response
   - task_state: task_state
   - status_reason: status_reason
   - ports: ports
+  - user_id: user_id
+  - project_id: project_id
+  - disk: disk
+  - registry_id: registry_id
+  - cpu_policy: cpu_policy
 
 Response Example
 ----------------
@@ -670,7 +761,7 @@ Response Example
 Get archive from  a container
 =============================
 
-.. rest_method:: GET /v1/containers/{container_ident}/get_archive?path={source_path}
+.. rest_method:: GET /v1/containers/{container_ident}/get_archive
 
 Get a tar archive of a resource in the filesystem of a container.
 
@@ -713,7 +804,7 @@ Response Example
 Put archive to a container
 ==========================
 
-.. rest_method:: POST /v1/containers/{container_ident}/put_archive?path={destination_path}
+.. rest_method:: POST /v1/containers/{container_ident}/put_archive
 
 Upload a tar archive to be extracted to a path in the filesystem of container.
 
@@ -759,7 +850,7 @@ This request does not return anything in the response body.
 Add security group for specified container
 ==========================================
 
-.. rest_method:: POST /v1/containers/{container_ident}/add_securtiy_group?name={security_group}
+.. rest_method:: POST /v1/containers/{container_ident}/add_securtiy_group
 
 Add security group for specified container.
 
@@ -798,7 +889,7 @@ This request does not return anything in the response body.
 Commit a container
 ==================
 
-.. rest_method:: POST /v1/containers/{container_ident}/commit?tag={tag}&repository={repository}
+.. rest_method:: POST /v1/containers/{container_ident}/commit
 
 Create a new image from a container's changes.
 
@@ -851,7 +942,7 @@ Response Codes
 
 .. rest_status_code:: success status.yaml
 
-   - 202
+   - 200
 
 .. rest_status_code:: error status.yaml
 
@@ -878,7 +969,7 @@ not in json format.
 Detach a network from a container
 =================================
 
-.. rest_method:: POST /v1/containers/{container_ident}/network_detach?network={network}
+.. rest_method:: POST /v1/containers/{container_ident}/network_detach
 
 Detach a network from a container.
 
@@ -895,10 +986,14 @@ Response Codes
    - 403
    - 404
 
+Request
+-------
+
 .. rest_parameters:: parameters.yaml
 
    - container_ident: container_ident
-   - network: network
+   - network: network-query
+   - port: port-query
 
 Response
 --------
@@ -913,7 +1008,7 @@ This request does not return anything in the response body.
 Resize a container
 ==================
 
-.. rest_method:: POST /v1/containers/{container_ident}/resize?w={width}&h={height}
+.. rest_method:: POST /v1/containers/{container_ident}/resize
 
 Resize tty to a container
 
@@ -960,7 +1055,7 @@ This request does not return anything in the response body.
 Attach a network to a container
 ===============================
 
-.. rest_method:: POST /v1/containers/{container_ident}/network_attach?network={network}
+.. rest_method:: POST /v1/containers/{container_ident}/network_attach
 
 Attach a network to a container.
 
@@ -977,10 +1072,15 @@ Response Codes
    - 403
    - 404
 
+Request
+-------
+
 .. rest_parameters:: parameters.yaml
 
    - container_ident: container_ident
-   - network: network
+   - network: network-query
+   - port: port-query
+   - fixed_ip: fixed_ip-query
 
 Response
 --------
@@ -995,7 +1095,7 @@ This request does not return anything in the response body.
 Execute command in a running container
 ======================================
 
-.. rest_method:: POST /v1/containers/{container_ident}/execute?command={command}&run={run}&interactive={interactive}
+.. rest_method:: POST /v1/containers/{container_ident}/execute
 
 Execute command in a running container.
 
@@ -1053,7 +1153,7 @@ Response Example
 Resize tty when execute command in a container
 ==============================================
 
-.. rest_method:: POST /v1/containers/{container_ident}/execute_resize?h={height}&&exec_id={exec_id}&w={width}
+.. rest_method:: POST /v1/containers/{container_ident}/execute_resize
 
 Resize tty when execute command in a container.
 
@@ -1098,7 +1198,7 @@ Response Example
 Get logs of a container
 =======================
 
-.. rest_method:: GET /v1/containers/{container_ident}/logs?timestamps={timestamps}&&since={since}&tail={tail}&stderr={stderr}&stdout={stdout}
+.. rest_method:: GET /v1/containers/{container_ident}/logs
 
 Get logs of a container.
 
@@ -1144,7 +1244,7 @@ not in json format.
 Display the running processes in a container
 ============================================
 
-.. rest_method:: GET /v1/containers/{container_ident}/top?ps_args={ps_args}
+.. rest_method:: GET /v1/containers/{container_ident}/top
 
 Display the running processes in a container.
 
@@ -1182,3 +1282,147 @@ Response Example
 
 .. literalinclude:: samples/container-top-resp.json
    :language: javascript
+
+
+List networks on a container
+============================
+
+.. rest_method:: GET /v1/containers/{container_ident}/network_list
+
+List networks on a container
+
+Response Codes
+--------------
+
+.. rest_status_code:: success status.yaml
+
+   - 200
+
+.. rest_status_code:: error status.yaml
+
+   - 401
+   - 403
+   - 404
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+   - container_ident: container_ident
+
+Response
+--------
+
+.. rest_parameters:: parameters.yaml
+
+   - net_id: net_id
+   - subnet_id: subnet_id
+   - port_id: port_id
+   - version: version
+   - ip_address: ip_address
+   - fixed_ips: fixed_ips
+
+Response Example
+----------------
+
+.. literalinclude:: samples/container-network-list-resp.json
+   :language: javascript
+
+List Actions For Container
+==========================
+
+.. rest_method:: GET /v1/containers/{container_ident}/container_actions
+
+List actions for a container
+
+Response Codes
+--------------
+
+.. rest_status_code:: success status.yaml
+
+    - 200
+
+.. rest_status_code:: error status.yaml
+
+    - 401
+    - 403
+    - 404
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+    - container_ident: container_ident
+
+Response
+--------
+
+.. rest_parameters:: parameters.yaml
+
+    - action: action
+    - container_uuid: uuid
+    - message: message
+    - request_id: request_id_body
+    - start_time: start_time
+    - project_id: project_id_container_action
+    - user_id: user_id
+
+**Example List Actions For Container: JSON response**
+
+.. literalinclude:: samples/container-actions-list-resp.json
+    :language: javascript
+
+
+Show Container Action Details
+=============================
+
+.. rest_method:: GET /v1/containers/{container_ident}/container_actions/{request_ident}
+
+Show details for a container action.
+
+Response Codes
+--------------
+
+.. rest_status_code:: success status.yaml
+
+    - 200
+
+.. rest_status_code:: error status.yaml
+
+    - 401
+    - 403
+    - 404
+
+Request
+-------
+
+.. rest_parameters:: parameters.yaml
+
+    - container_ident: container_ident
+    - request_ident: request_ident
+
+Response
+--------
+
+.. rest_parameters:: parameters.yaml
+
+    - action: action
+    - container_uuid: uuid
+    - message: message
+    - project_id: project_id_container_action
+    - request_id: request_id_body
+    - start_time: start_time
+    - user_id: user_id
+    - events: container_action_events
+    - events.event: event
+    - events.start_time: event_start_time
+    - events.finish_time: event_finish_time
+    - events.result: event_result
+    - events.traceback: event_traceback
+
+**Example Show Container Action Details: JSON response**
+
+.. literalinclude:: samples/container-action-get-resp.json
+    :language: javascript

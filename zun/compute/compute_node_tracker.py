@@ -20,11 +20,14 @@ from oslo_log import log as logging
 from zun.common import exception
 from zun.common import utils
 from zun.compute import claims
+import zun.conf
 from zun import objects
 from zun.objects import base as obj_base
 from zun.pci import manager as pci_manager
 from zun.scheduler import client as scheduler_client
 
+
+CONF = zun.conf.CONF
 LOG = logging.getLogger(__name__)
 COMPUTE_RESOURCE_SEMAPHORE = "compute_resources"
 
@@ -50,22 +53,38 @@ class ComputeNodeTracker(object):
             compute_node.pci_device_pools = dev_pools_obj
 
     def update_available_resources(self, context):
+        resources = self.container_driver.get_available_resources()
+        # We allow 'cpu_used' to be missing from the container driver,
+        # but the DB requires it to be non-null so just initialize it to 0.
+        resources.setdefault('cpu_used', 0)
+
         # Check if the compute_node is already registered
         node = self._get_compute_node(context)
         if not node:
             # If not, register it and pass the object to the driver
-            numa_obj = self.container_driver.get_host_numa_topology()
             node = objects.ComputeNode(context)
             node.hostname = self.host
-            node.numa_topology = numa_obj
+            self._copy_resources(node, resources)
             node.create(context)
             LOG.info('Node created for :%(host)s', {'host': self.host})
-        self.container_driver.get_available_resources(node)
+        else:
+            self._copy_resources(node, resources)
         self._setup_pci_tracker(context, node)
         self.compute_node = node
         self._update_available_resource(context)
         # NOTE(sbiswas7): Consider removing the return statement if not needed
         return node
+
+    def _copy_resources(self, node, resources):
+        keys = ["numa_topology", "mem_total", "mem_free", "mem_available",
+                "mem_used", "total_containers", "running_containers",
+                "paused_containers", "stopped_containers", "cpus",
+                "architecture", "os_type", "os", "kernel_version", "cpu_used",
+                "labels", "disk_total", "disk_quota_supported", "runtimes",
+                "enable_cpu_pinning"]
+        for key in keys:
+            if key in resources:
+                setattr(node, key, resources[key])
 
     def _get_compute_node(self, context):
         """Returns compute node for the host"""
@@ -85,17 +104,17 @@ class ComputeNodeTracker(object):
         :param context: security context
         :param container: container to reserve resources for.
         :type container: zun.objects.container.Container object
-        :param pci_requests: pci reqeusts for sriov port.
+        :param pci_requests: pci requests for sriov port.
         :param limits: Dict of oversubscription limits for memory, disk,
                        and CPUs.
         :returns: A Claim ticket representing the reserved resources.  It can
                   be used to revert the resource usage if an error occurs
                   during the container build.
         """
-        # No memory, cpu, or pci_request specified, no need to claim resource
-        # now.
-        if not (container.memory or container.cpu or pci_requests):
-            self._set_container_host(context, container)
+        # No memory, cpu, disk or pci_request specified, no need to claim
+        # resource now.
+        if not (container.memory or container.cpu or pci_requests or
+                container.disk):
             return claims.NopClaim()
 
         # We should have the compute node created here, just get it.
@@ -110,6 +129,42 @@ class ComputeNodeTracker(object):
 
         self._set_container_host(context, container)
         self._update_usage_from_container(context, container)
+        # persist changes to the compute node:
+        self._update(self.compute_node)
+
+        return claim
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def container_update_claim(self, context, new_container, old_container,
+                               limits=None):
+        """Indicate resources are needed for an upcoming container update.
+
+        This should be called before the compute node is about to perform
+        an container update operation that will consume additional resources.
+
+        :param context: security context
+        :param new_container: container to be updated to.
+        :type new_container: zun.objects.container.Container object
+        :param old_container: container to be updated from.
+        :type old_container: zun.objects.container.Container object
+        :param limits: Dict of oversubscription limits for memory, disk,
+                       and CPUs.
+        :returns: A Claim ticket representing the reserved resources.  It can
+                  be used to revert the resource usage if an error occurs
+                  during the container update.
+        """
+        if (new_container.cpu == old_container.cpu and
+                new_container.memory == old_container.memory):
+            return claims.NopClaim()
+
+        # We should have the compute node created here, just get it.
+        self.compute_node = self._get_compute_node(context)
+
+        claim = claims.UpdateClaim(context, new_container, old_container,
+                                   self, self.compute_node, limits=limits)
+
+        self._update_usage_from_container_update(context, new_container,
+                                                 old_container)
         # persist changes to the compute node:
         self._update(self.compute_node)
 
@@ -152,10 +207,20 @@ class ComputeNodeTracker(object):
             # new container, update compute node resource usage:
             self._update_usage(self._get_usage_dict(container), sign=sign)
 
+    def _update_usage_from_container_update(self, context, new_container,
+                                            old_container):
+        """Update usage for a container update."""
+        uuid = new_container.uuid
+        self.tracked_containers[uuid] = obj_base.obj_to_primitive(
+            new_container)
+        # update compute node resource usage
+        self._update_usage(self._get_usage_dict(old_container), sign=-1)
+        self._update_usage(self._get_usage_dict(new_container))
+
     def _update_usage_from_containers(self, context, containers):
         """Calculate resource usage based on container utilization.
 
-        This is different than the conatiner daemon view as it will account
+        This is different than the container daemon view as it will account
         for all containers assigned to the local compute host, even if they
         are not currently powered on.
         """
@@ -167,6 +232,7 @@ class ComputeNodeTracker(object):
         cn.mem_free = cn.mem_total
         cn.mem_used = 0
         cn.running_containers = 0
+        cn.disk_used = 0
 
         for cnt in containers:
             self._update_usage_from_container(context, cnt)
@@ -176,17 +242,35 @@ class ComputeNodeTracker(object):
     def _update_usage(self, usage, sign=1):
         mem_usage = usage['memory']
         cpus_usage = usage.get('cpu', 0)
+        disk_usage = usage['disk']
+        cpuset_cpus_usage = None
+        numa_node_id = 0
+        if 'cpuset_cpus' in usage.keys():
+            cpuset_cpus_usage = usage['cpuset_cpus']
+            numa_node_id = usage['node']
 
         cn = self.compute_node
+        numa_topology = cn.numa_topology.nodes
         cn.mem_used += sign * mem_usage
         cn.cpu_used += sign * cpus_usage
+        cn.disk_used += sign * disk_usage
 
         # free ram may be negative, depending on policy:
         cn.mem_free = cn.mem_total - cn.mem_used
 
         cn.running_containers += sign * 1
 
-        # TODO(Shunli): Calculate the numa usage here
+        if cpuset_cpus_usage:
+            for numa_node in numa_topology:
+                if numa_node.id == numa_node_id:
+                    numa_node.mem_available = (numa_node.mem_available -
+                                               mem_usage * sign)
+                    if sign > 0:
+                        numa_node.pin_cpus(cpuset_cpus_usage)
+                        cn._changed_fields.add('numa_topology')
+                    else:
+                        numa_node.unpin_cpus(cpuset_cpus_usage)
+                        cn._changed_fields.add('numa_topology')
 
     def _update(self, compute_node):
         if not self._resource_change(compute_node):
@@ -246,11 +330,13 @@ class ComputeNodeTracker(object):
         # (Fixme): The Container.memory is string.
         memory = 0
         if container.memory:
-            memory = int(container.memory[:-1])
+            memory = int(container.memory)
         usage = {'memory': memory,
-                 'cpu': container.cpu or 0}
-
-        # update numa usage here
+                 'cpu': container.cpu or 0,
+                 'disk': container.disk or 0}
+        if container.cpuset.cpuset_cpus:
+            usage['cpuset_cpus'] = container.cpuset.cpuset_cpus
+            usage['node'] = int(container.cpuset.cpuset_mems)
 
         return usage
 
@@ -259,6 +345,14 @@ class ComputeNodeTracker(object):
         """Remove usage from the given container."""
         self._update_usage_from_container(context, container, is_removed=True)
 
+        self._update(self.compute_node)
+
+    @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+    def abort_container_update_claim(self, context, new_container,
+                                     old_container):
+        """Remove usage from the given container."""
+        self._update_usage_from_container_update(context, old_container,
+                                                 new_container)
         self._update(self.compute_node)
 
     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)

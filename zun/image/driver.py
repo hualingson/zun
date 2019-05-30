@@ -18,9 +18,7 @@ import sys
 from oslo_log import log as logging
 import stevedore
 
-from zun.common import exception
 from zun.common.i18n import _
-from zun.common.utils import parse_image_name
 import zun.conf
 
 CONF = zun.conf.CONF
@@ -37,6 +35,8 @@ def load_image_driver(image_driver=None):
     :returns: a ContainerImageDriver instance
     """
     if not image_driver:
+        image_driver = CONF.default_image_driver
+    if not image_driver:
         LOG.error("Container image driver option required, "
                   "but not specified")
         sys.exit(1)
@@ -50,7 +50,7 @@ def load_image_driver(image_driver=None):
 
         if not isinstance(driver, ContainerImageDriver):
             raise Exception(_('Expected driver of type: %s') %
-                            str(ContainerImageDriver))
+                            six.text_type(ContainerImageDriver))
 
         return driver
     except Exception:
@@ -58,97 +58,10 @@ def load_image_driver(image_driver=None):
         sys.exit(1)
 
 
-def pull_image(context, repo, tag, image_pull_policy='always',
-               image_driver=None):
-    if image_driver:
-        image_driver_list = [image_driver.lower()]
-    else:
-        image_driver_list = CONF.image_driver_list
-
-    for driver in image_driver_list:
-        try:
-            image_driver = load_image_driver(driver)
-            image, image_loaded = image_driver.pull_image(
-                context, repo, tag, image_pull_policy)
-            if image:
-                image['driver'] = driver.split('.')[0]
-                break
-        except exception.ImageNotFound:
-            image = None
-        except Exception as e:
-            LOG.exception('Unknown exception occurred while loading '
-                          'image: %s', six.text_type(e))
-            raise exception.ZunException(six.text_type(e))
-    if not image:
-        raise exception.ImageNotFound("Image %s not found" % repo)
-    return image, image_loaded
-
-
-def search_image(context, image_name, image_driver, exact_match):
-    images = []
-    repo, tag = parse_image_name(image_name)
-    if image_driver:
-        image_driver_list = [image_driver.lower()]
-    else:
-        image_driver_list = CONF.image_driver_list
-    for driver in image_driver_list:
-        try:
-            image_driver = load_image_driver(driver)
-            imgs = image_driver.search_image(context, repo, tag,
-                                             exact_match)
-            images.extend(imgs)
-        except Exception as e:
-            LOG.exception('Unknown exception occurred while searching '
-                          'for image: %s', six.text_type(e))
-            raise exception.ZunException(six.text_type(e))
-    return images
-
-
-def create_image(context, image_name, image_driver):
-    img = None
-    try:
-        img = image_driver.create_image(context, image_name)
-    except Exception as e:
-        LOG.exception('Unknown exception occurred while creating image: %s',
-                      six.text_type(e))
-        raise exception.ZunException(six.text_type(e))
-    return img
-
-
-def upload_image_data(context, image, image_tag, image_data,
-                      image_driver):
-    img = None
-    try:
-        img = image_driver.update_image(context,
-                                        image.id,
-                                        tag=image_tag)
-        # Image data has to match the image format.
-        # contain format defaults to 'docker';
-        # disk format defaults to 'qcow2'.
-        img = image_driver.upload_image_data(context,
-                                             image.id,
-                                             image_data)
-    except Exception as e:
-        LOG.exception('Unknown exception occurred while uploading image: %s',
-                      six.text_type(e))
-        raise exception.ZunException(six.text_type(e))
-    return img
-
-
-def delete_image(context, img_id, image_driver):
-    try:
-        image_driver.delete_image(context, img_id)
-    except Exception as e:
-        LOG.exception('Unknown exception occurred while deleting image %s: %s',
-                      img_id,
-                      six.text_type(e))
-        raise exception.ZunException(six.text_type(e))
-
-
 class ContainerImageDriver(object):
     """Base class for container image driver."""
 
-    def pull_image(self, context, repo, tag, image_pull_policy):
+    def pull_image(self, context, repo, tag, image_pull_policy, registry):
         """Pull an image."""
         raise NotImplementedError()
 
@@ -170,5 +83,13 @@ class ContainerImageDriver(object):
         raise NotImplementedError()
 
     def delete_image(self, context, img_id):
+        """Delete an image."""
+        raise NotImplementedError()
+
+    def delete_committed_image(self, context, img_id, image_driver):
+        """Delete a committed image."""
+        raise NotImplementedError()
+
+    def delete_image_tar(self, context, image):
         """Delete an image."""
         raise NotImplementedError()

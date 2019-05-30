@@ -12,13 +12,14 @@
 
 import copy
 
-from zun.common.validation import parameter_types
+from zun.api.controllers.v1.schemas import parameter_types
 
-_container_properties = {
+_legacy_container_properties = {
     'name': parameter_types.container_name,
     'image': parameter_types.image_name,
     'command': parameter_types.command,
     'cpu': parameter_types.cpu,
+    'cpu_policy': parameter_types.cpu_policy,
     'memory': parameter_types.memory,
     'workdir': parameter_types.workdir,
     'auto_remove': parameter_types.auto_remove,
@@ -34,13 +35,36 @@ _container_properties = {
     'nets': parameter_types.nets,
     'runtime': parameter_types.runtime,
     'hostname': parameter_types.hostname,
-    'disk': parameter_types.positive_integer,
+    'disk': parameter_types.disk,
+    'availability_zone': parameter_types.availability_zone,
+    'auto_heal': parameter_types.boolean,
+    'privileged': parameter_types.boolean,
+    'healthcheck': parameter_types.healthcheck,
+    'exposed_ports': parameter_types.exposed_ports,
+    'registry': parameter_types.container_registry,
 }
+
+legacy_container_create = {
+    'type': 'object',
+    'properties': _legacy_container_properties,
+    'required': ['image'],
+    'additionalProperties': False
+}
+
+_container_properties = copy.deepcopy(_legacy_container_properties)
+_container_properties['command'] = parameter_types.command_list
 
 container_create = {
     'type': 'object',
     'properties': _container_properties,
-    'required': ['image'],
+    'allOf': [
+        {
+            'required': ['image'],
+        },
+        {
+            'not': {'required': ['security_groups', 'exposed_ports']}
+        }
+    ],
     'additionalProperties': False
 }
 
@@ -63,6 +87,8 @@ query_param_create = {
 _container_update_properties = {
     'cpu': parameter_types.cpu,
     'memory': parameter_types.memory,
+    'name': parameter_types.container_name,
+    'auto_heal': parameter_types.boolean
 }
 
 container_update = {
@@ -174,11 +200,48 @@ network_detach = {
     'type': 'object',
     'properties': {
         'network': {
-            'type': 'string'
+            'type': 'string',
+            'minLength': 1,
+            'maxLength': 255,
+        },
+        'port': {
+            'type': 'string',
+            'minLength': 1,
+            'maxLength': 255,
         }
     },
-    'required': ['network'],
+    'oneOf': [
+        {
+            'required': ['network']
+        },
+        {
+            'required': ['port']
+        }
+    ],
     'additionalProperties': False
 }
 
-network_attach = copy.deepcopy(network_detach)
+network_attach = {
+    'type': 'object',
+    'properties': {
+        'network': {
+            'type': ['string'],
+            'minLength': 1,
+            'maxLength': 255,
+        },
+        'fixed_ip': {
+            'type': ['string'],
+            'oneOf': [
+                {'format': 'ipv4'},
+                {'format': 'ipv6'}
+            ]
+        },
+        'port': {
+            'type': ['string'],
+            'maxLength': 255,
+            'minLength': 1,
+        }
+    },
+    'additionalProperties': False,
+    'not': {'required': ['port', 'network']}
+}
